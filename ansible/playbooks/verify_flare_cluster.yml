@@ -1,0 +1,431 @@
+---
+- name: Verify NVIDIA FLARE Cluster Functionality
+  hosts: nodes
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    flare_user: "{{ ansible_user }}"
+    flare_home: "/home/{{ flare_user }}/nvflare"
+    server_host: "192.168.1.7"
+    
+  tasks:
+    - name: Check system requirements
+      block:
+        - name: Verify Python installation
+          ansible.builtin.command: python3 --version
+          register: python_version
+          changed_when: false
+          
+        - name: Check NVIDIA drivers (if GPU available)
+          ansible.builtin.command: nvidia-smi
+          register: nvidia_status
+          failed_when: false
+          changed_when: false
+          
+        - name: Check containerd status
+          ansible.builtin.systemd:
+            name: containerd
+            state: started
+          register: containerd_status
+          
+        - name: Verify NVIDIA Container Toolkit
+          ansible.builtin.command: nvidia-ctk --version
+          register: nvidia_ctk_version
+          failed_when: false
+          changed_when: false
+          
+    - name: Check FLARE installation (server only)
+      block:
+        - name: Verify FLARE virtual environment
+          ansible.builtin.stat:
+            path: "{{ flare_home }}/venv/bin/activate"
+          register: venv_status
+          
+        - name: Check FLARE version
+          ansible.builtin.shell: |
+            source {{ flare_home }}/venv/bin/activate
+            python -c "import nvflare; print(nvflare.__version__)"
+          register: flare_version
+          become_user: "{{ flare_user }}"
+          when: venv_status.stat.exists
+          
+        - name: Verify server workspace
+          ansible.builtin.stat:
+            path: "{{ flare_home }}/workspace/server"
+          register: server_workspace
+          
+        - name: Verify admin workspace
+          ansible.builtin.stat:
+            path: "{{ flare_home }}/workspace/admin"
+          register: admin_workspace
+          
+        - name: Check CIFAR-10 job
+          ansible.builtin.stat:
+            path: "{{ flare_home }}/jobs/cifar10_federated"
+          register: cifar10_job
+          
+      when: inventory_hostname in groups['flare_server']
+      
+    - name: Check FLARE client setup
+      block:
+        - name: Check if uv is installed
+          ansible.builtin.stat:
+            path: "/home/{{ flare_user }}/.local/bin/uv"
+          register: uv_installed
+          
+        - name: Verify client workspace directory
+          ansible.builtin.stat:
+            path: "{{ flare_home }}/workspace/client"
+          register: client_workspace
+          
+        - name: Check client virtual environment
+          ansible.builtin.stat:
+            path: "{{ flare_home }}/venv"
+          register: client_venv
+          
+      when: inventory_hostname in groups['flare_clients']
+      
+    - name: Test network connectivity
+      block:
+        - name: Test connectivity to server (from clients)
+          ansible.builtin.wait_for:
+            host: "{{ server_host }}"
+            port: 8002
+            timeout: 5
+          register: server_connectivity
+          failed_when: false
+          when: inventory_hostname in groups['flare_clients']
+          
+        - name: Test admin port connectivity (from clients)
+          ansible.builtin.wait_for:
+            host: "{{ server_host }}"
+            port: 8003
+            timeout: 5
+          register: admin_connectivity
+          failed_when: false
+          when: inventory_hostname in groups['flare_clients']
+          
+        - name: Check if FLARE server ports are open (on server)
+          ansible.builtin.wait_for:
+            port: "{{ item }}"
+            timeout: 5
+          register: port_status
+          failed_when: false
+          loop:
+            - 8002
+            - 8003
+          when: inventory_hostname in groups['flare_server']
+          
+    - name: Check service status
+      block:
+        - name: Check FLARE server service status
+          ansible.builtin.systemd:
+            name: nvflare-server
+          register: server_service_status
+          when: inventory_hostname in groups['flare_server']
+          
+        - name: Check FLARE client service status
+          ansible.builtin.systemd:
+            name: nvflare-client
+          register: client_service_status
+          when: inventory_hostname in groups['flare_clients']
+          
+    - name: Test container functionality
+      block:
+        - name: Test basic container run
+          ansible.builtin.command: nerdctl run --rm hello-world
+          register: container_test
+          failed_when: false
+          changed_when: false
+          
+        - name: Test GPU container (if NVIDIA available)
+          ansible.builtin.command: nerdctl run --gpus all --rm nvidia/cuda:12.0-base-ubuntu20.04 nvidia-smi
+          register: gpu_container_test
+          failed_when: false
+          changed_when: false
+          when: nvidia_status.rc == 0
+          
+    - name: Generate verification report
+      ansible.builtin.set_fact:
+        verification_report:
+          hostname: "{{ inventory_hostname }}"
+          role: "{{ 'server' if inventory_hostname in groups['flare_server'] else 'client' }}"
+          python_version: "{{ python_version.stdout | default('Not available') }}"
+          nvidia_available: "{{ nvidia_status.rc == 0 | default(false) }}"
+          containerd_running: "{{ containerd_status.state == 'started' }}"
+          nvidia_ctk_version: "{{ nvidia_ctk_version.stdout | default('Not installed') }}"
+          flare_version: "{{ flare_version.stdout | default('Not available') }}"
+          container_test_passed: "{{ container_test.rc == 0 | default(false) }}"
+          gpu_container_test_passed: "{{ gpu_container_test.rc == 0 | default(false) }}"
+          
+    - name: Display verification results
+      ansible.builtin.debug:
+        msg: |
+          ================================================
+          NVIDIA FLARE Cluster Verification Report
+          ================================================
+          Host: {{ verification_report.hostname }}
+          Role: {{ verification_report.role }}
+          
+          System Status:
+          - Python Version: {{ verification_report.python_version }}
+          - NVIDIA GPU Available: {{ 'Yes' if verification_report.nvidia_available else 'No' }}
+          - containerd Running: {{ 'Yes' if verification_report.containerd_running else 'No' }}
+          - NVIDIA Container Toolkit: {{ verification_report.nvidia_ctk_version }}
+          - FLARE Version: {{ verification_report.flare_version }}
+          
+          Container Tests:
+          - Basic Container: {{ 'Passed' if verification_report.container_test_passed else 'Failed' }}
+          - GPU Container: {{ 'Passed' if verification_report.gpu_container_test_passed else 'Failed/N/A' }}
+          
+          {% if inventory_hostname in groups['flare_server'] %}
+          Server-Specific Status:
+          - Server Workspace: {{ 'Ready' if server_workspace.stat.exists else 'Missing' }}
+          - Admin Workspace: {{ 'Ready' if admin_workspace.stat.exists else 'Missing' }}
+          - CIFAR-10 Job: {{ 'Ready' if cifar10_job.stat.exists else 'Missing' }}
+          - Server Service: {{ server_service_status.status | default('Unknown') }}
+          - Port 8002 (Fed Learning): {{ 'Open' if port_status.results[0].elapsed is defined else 'Closed' }}
+          - Port 8003 (Admin): {{ 'Open' if port_status.results[1].elapsed is defined else 'Closed' }}
+          {% endif %}
+          
+          {% if inventory_hostname in groups['flare_clients'] %}
+          Client-Specific Status:
+          - uv Package Manager: {{ 'Installed' if uv_installed.stat.exists else 'Missing' }}
+          - Client Workspace: {{ 'Ready' if client_workspace.stat.exists else 'Missing' }}
+          - Virtual Environment: {{ 'Ready' if client_venv.stat.exists else 'Missing' }}
+          - Client Service: {{ client_service_status.status | default('Unknown') }}
+          - Server Connectivity (8002): {{ 'OK' if server_connectivity.elapsed is defined else 'Failed' }}
+          - Admin Connectivity (8003): {{ 'OK' if admin_connectivity.elapsed is defined else 'Failed' }}
+          {% endif %}
+          
+          ================================================
+
+- name: Generate cluster summary report
+  hosts: flare_server
+  become: no
+  gather_facts: no
+  
+  tasks:
+    - name: Create comprehensive cluster status script
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/cluster_status.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          echo "========================================"
+          echo "NVIDIA FLARE Cluster Status Summary"
+          echo "========================================"
+          echo "Generated: $(date)"
+          echo ""
+          
+          # Server status
+          echo "SERVER STATUS ({{ inventory_hostname }}):"
+          echo "----------------------------------------"
+          if systemctl is-active --quiet nvflare-server; then
+              echo "✓ FLARE Server Service: Running"
+          else
+              echo "✗ FLARE Server Service: Stopped"
+          fi
+          
+          if [ -f "{{ flare_home }}/workspace/server/startup/fl_server.pid" ]; then
+              PID=$(cat {{ flare_home }}/workspace/server/startup/fl_server.pid 2>/dev/null)
+              if kill -0 "$PID" 2>/dev/null; then
+                  echo "✓ FLARE Server Process: Running (PID: $PID)"
+              else
+                  echo "✗ FLARE Server Process: Not running"
+              fi
+          else
+              echo "? FLARE Server Process: Unknown (no PID file)"
+          fi
+          
+          # Check ports
+          if netstat -tuln | grep -q ":8002 "; then
+              echo "✓ Fed Learning Port (8002): Open"
+          else
+              echo "✗ Fed Learning Port (8002): Closed"
+          fi
+          
+          if netstat -tuln | grep -q ":8003 "; then
+              echo "✓ Admin Port (8003): Open"
+          else
+              echo "✗ Admin Port (8003): Closed"
+          fi
+          
+          echo ""
+          
+          # Client connectivity
+          echo "CLIENT CONNECTIVITY:"
+          echo "-------------------"
+          {% for client in groups['flare_clients'] %}
+          if ping -c 1 {{ client }} &> /dev/null; then
+              echo "✓ {{ client }}: Reachable"
+          else
+              echo "✗ {{ client }}: Unreachable"
+          fi
+          {% endfor %}
+          
+          echo ""
+          
+          # Job status
+          echo "JOB STATUS:"
+          echo "----------"
+          if [ -d "{{ flare_home }}/jobs/cifar10_federated" ]; then
+              echo "✓ CIFAR-10 Job: Available"
+              if [ -f "{{ flare_home }}/jobs/cifar10_federated/app/models/server.pt" ]; then
+                  echo "✓ Initial Model: Created"
+              else
+                  echo "✗ Initial Model: Missing"
+              fi
+          else
+              echo "✗ CIFAR-10 Job: Not found"
+          fi
+          
+          echo ""
+          
+          # Recent logs
+          echo "RECENT SERVER LOGS:"
+          echo "------------------"
+          if [ -f "{{ flare_home }}/logs/server.log" ]; then
+              tail -n 5 {{ flare_home }}/logs/server.log
+          else
+              echo "No server logs found"
+          fi
+          
+          echo ""
+          echo "========================================"
+          echo "Quick Commands:"
+          echo "- Start server: sudo systemctl start nvflare-server"
+          echo "- Stop server: sudo systemctl stop nvflare-server"
+          echo "- View logs: tail -f {{ flare_home }}/logs/server.log"
+          echo "- Admin console: cd {{ flare_home }}/workspace/admin && ./start.sh"
+          echo "- Submit job: {{ flare_home }}/submit_job.sh"
+          echo "- Monitor: {{ flare_home }}/monitor_job.sh"
+          echo "========================================"
+          
+    - name: Create federated learning test script
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/test_federated_learning.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          echo "========================================"
+          echo "NVIDIA FLARE Federated Learning Test"
+          echo "========================================"
+          echo ""
+          
+          FLARE_HOME="{{ flare_home }}"
+          JOB_NAME="cifar10_federated"
+          
+          # Pre-flight checks
+          echo "1. Pre-flight Checks:"
+          echo "--------------------"
+          
+          # Check server
+          if ! systemctl is-active --quiet nvflare-server; then
+              echo "✗ FLARE server is not running. Starting server..."
+              sudo systemctl start nvflare-server
+              sleep 10
+          else
+              echo "✓ FLARE server is running"
+          fi
+          
+          # Check job
+          if [ ! -d "${FLARE_HOME}/jobs/${JOB_NAME}" ]; then
+              echo "✗ Job ${JOB_NAME} not found"
+              exit 1
+          else
+              echo "✓ Job ${JOB_NAME} is available"
+          fi
+          
+          # Check initial model
+          if [ ! -f "${FLARE_HOME}/jobs/${JOB_NAME}/app/models/server.pt" ]; then
+              echo "? Initial model not found, creating..."
+              cd "${FLARE_HOME}/jobs/${JOB_NAME}"
+              source ${FLARE_HOME}/venv/bin/activate
+              python create_initial_model.py
+          else
+              echo "✓ Initial model is ready"
+          fi
+          
+          echo ""
+          
+          # Client status
+          echo "2. Client Status:"
+          echo "----------------"
+          {% for client in groups['flare_clients'] %}
+          if ping -c 1 {{ client }} &> /dev/null; then
+              echo "✓ Client {{ client }}: Reachable"
+          else
+              echo "✗ Client {{ client }}: Unreachable"
+          fi
+          {% endfor %}
+          
+          echo ""
+          
+          # Instructions for manual testing
+          echo "3. Manual Testing Instructions:"
+          echo "------------------------------"
+          echo ""
+          echo "To run the federated learning test:"
+          echo ""
+          echo "1. Start the admin console:"
+          echo "   cd ${FLARE_HOME}/workspace/admin"
+          echo "   ./start.sh"
+          echo ""
+          echo "2. In the admin console, run these commands:"
+          echo "   > check_status server"
+          echo "   > list_clients"
+          echo "   > submit_job ${FLARE_HOME}/jobs/${JOB_NAME}"
+          echo "   > show_stats"
+          echo "   > show_errors"
+          echo ""
+          echo "3. Start clients on each client node:"
+          echo "   sudo systemctl start nvflare-client"
+          echo ""
+          echo "4. Monitor training progress:"
+          echo "   > show_stats"
+          echo "   > list_jobs"
+          echo ""
+          echo "5. View logs:"
+          echo "   Server: tail -f ${FLARE_HOME}/logs/server.log"
+          echo "   Clients: tail -f ${FLARE_HOME}/logs/client.log (on each client)"
+          echo ""
+          echo "========================================"
+          echo "Expected Behavior:"
+          echo "- 5 rounds of federated training"
+          echo "- Each round aggregates updates from 3+ clients"
+          echo "- CIFAR-10 model training with non-IID data distribution"
+          echo "- Model accuracy should improve over rounds"
+          echo "========================================"
+          
+    - name: Display final verification summary
+      ansible.builtin.debug:
+        msg: |
+          ======================================== 
+          NVIDIA FLARE Cluster Verification Complete
+          ========================================
+          
+          Cluster Configuration:
+          - Server: {{ inventory_hostname }} ({{ ansible_default_ipv4.address }})
+          - Clients: {{ groups['flare_clients'] | length }} nodes
+          - Job: CIFAR-10 Federated Learning
+          
+          Management Scripts Created:
+          - Cluster Status: {{ flare_home }}/cluster_status.sh
+          - FL Test Guide: {{ flare_home }}/test_federated_learning.sh
+          - Job Submission: {{ flare_home }}/submit_job.sh
+          - Monitoring: {{ flare_home }}/monitor_job.sh
+          
+          Next Steps:
+          1. Run cluster status: {{ flare_home }}/cluster_status.sh
+          2. Start clients: ansible -i inventory.ini flare_clients -b -m systemd -a "name=nvflare-client state=started"
+          3. Test federated learning: {{ flare_home }}/test_federated_learning.sh
+          
+          ========================================

@@ -1,0 +1,187 @@
+---
+- name: Deploy NVIDIA FLARE Clients (Fixed)
+  hosts: flare_clients
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    flare_user: "{{ ansible_user }}"
+    flare_home: "/home/{{ flare_user }}/nvflare"
+    client_workspace: "{{ flare_home }}/workspace/client"
+    server_host: "192.168.1.7"  # FLARE server IP
+    
+  tasks:
+    - name: Install Python 3.10 and dependencies
+      ansible.builtin.apt:
+        name:
+          - software-properties-common
+          - curl
+          - python3.10
+          - python3.10-venv
+          - python3.10-dev
+        state: present
+        update_cache: yes
+        
+    - name: Install uv package manager with proper shell
+      ansible.builtin.shell: |
+        curl -LsSf https://astral.sh/uv/install.sh | bash
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+      args:
+        executable: /bin/bash
+        creates: "/home/{{ flare_user }}/.local/bin/uv"
+      become_user: "{{ flare_user }}"
+      
+    - name: Install Python 3.10 with uv using bash
+      ansible.builtin.shell: |
+        export PATH="$HOME/.local/bin:$PATH"
+        uv python install 3.10
+      args:
+        executable: /bin/bash
+        creates: "/home/{{ flare_user }}/.local/share/uv/python"
+      become_user: "{{ flare_user }}"
+      
+    - name: Create FLARE directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+      loop:
+        - "{{ flare_home }}"
+        - "{{ flare_home }}/logs"
+        - "{{ flare_home }}/apps"
+        - "{{ client_workspace }}"
+        
+    - name: Create Python virtual environment with bash
+      ansible.builtin.shell: |
+        export PATH="$HOME/.local/bin:$PATH"
+        uv venv {{ flare_home }}/venv --python 3.10
+      args:
+        executable: /bin/bash
+        creates: "{{ flare_home }}/venv"
+      become_user: "{{ flare_user }}"
+      
+    - name: Install NVIDIA FLARE in virtual environment
+      ansible.builtin.shell: |
+        export PATH="$HOME/.local/bin:$PATH"
+        source {{ flare_home }}/venv/bin/activate
+        uv pip install nvflare==2.4.1 "cryptography<42" torch torchvision
+      args:
+        executable: /bin/bash
+      become_user: "{{ flare_user }}"
+      
+    - name: Set client site name based on inventory position
+      ansible.builtin.set_fact:
+        site_name: "site-{{ groups['flare_clients'].index(inventory_hostname) + 1 }}"
+        
+    - name: Copy client workspace from server via rsync
+      ansible.builtin.shell: |
+        rsync -avz k3s-server-07@{{ server_host }}:/home/k3s-server-07/nvflare/cifar10_federated/workspace/cifar10_federated/prod_00/{{ site_name }}/ {{ client_workspace }}/
+      become_user: "{{ flare_user }}"
+      ignore_errors: yes
+      
+    - name: Fallback - copy available client workspace
+      ansible.builtin.shell: |
+        if [ ! -f "{{ client_workspace }}/fed_client.json" ]; then
+          echo "Copying from site-1 as fallback..."
+          rsync -avz k3s-server-07@{{ server_host }}:/home/k3s-server-07/nvflare/cifar10_federated/workspace/cifar10_federated/prod_00/site-1/ {{ client_workspace }}/
+        fi
+      become_user: "{{ flare_user }}"
+      ignore_errors: yes
+      
+    - name: Create client startup script
+      ansible.builtin.copy:
+        dest: "{{ client_workspace }}/start.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          # Activate virtual environment
+          export PATH="$HOME/.local/bin:$PATH"
+          source {{ flare_home }}/venv/bin/activate
+          
+          # Set working directory
+          cd {{ client_workspace }}
+          
+          # Start FLARE client
+          echo "Starting NVIDIA FLARE Client ({{ site_name }})..."
+          echo "Working directory: $(pwd)"
+          echo "Python path: $(which python)"
+          echo "FLARE version: $(python -c 'import nvflare; print(nvflare.__version__)')"
+          echo "Connecting to server: {{ server_host }}"
+          
+          # Create startup directory
+          mkdir -p startup
+          
+          # Start the client in background
+          nohup python -u -m nvflare.private.fed.app.client.client_train -m {{ client_workspace }} -s fed_client.json --set secure_train=true uid={{ site_name }} org=nvidia > {{ flare_home }}/logs/client.log 2>&1 &
+          
+          # Save PID
+          echo $! > {{ client_workspace }}/startup/fl_client.pid
+          
+          echo "NVIDIA FLARE Client started with PID: $(cat {{ client_workspace }}/startup/fl_client.pid)"
+          
+    - name: Create client stop script
+      ansible.builtin.copy:
+        dest: "{{ client_workspace }}/stop_fl.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          PID_FILE="{{ client_workspace }}/startup/fl_client.pid"
+          
+          if [ -f "$PID_FILE" ]; then
+              PID=$(cat "$PID_FILE")
+              echo "Stopping NVIDIA FLARE Client ({{ site_name }}, PID: $PID)..."
+              
+              if kill -0 "$PID" 2>/dev/null; then
+                  kill "$PID"
+                  sleep 5
+                  
+                  if kill -0 "$PID" 2>/dev/null; then
+                      echo "Force killing NVIDIA FLARE Client..."
+                      kill -9 "$PID"
+                  fi
+                  
+                  rm -f "$PID_FILE"
+                  echo "NVIDIA FLARE Client stopped."
+              else
+                  echo "NVIDIA FLARE Client is not running."
+                  rm -f "$PID_FILE"
+              fi
+          else
+              echo "No PID file found. NVIDIA FLARE Client may not be running."
+          fi
+          
+    - name: Create startup directory
+      ansible.builtin.file:
+        path: "{{ client_workspace }}/startup"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        
+    - name: Check if client configuration exists
+      ansible.builtin.stat:
+        path: "{{ client_workspace }}/fed_client.json"
+      register: client_config
+      
+    - name: Display client deployment status
+      ansible.builtin.debug:
+        msg: |
+          NVIDIA FLARE Client deployment completed!
+          
+          Client site: {{ site_name }}
+          Client workspace: {{ client_workspace }}
+          Configuration file: {{ 'Found' if client_config.stat.exists else 'Not found - may need manual configuration' }}
+          Server connection: {{ server_host }}
+          
+          Manual start/stop:
+          - Start: cd {{ client_workspace }} && ./start.sh
+          - Stop: cd {{ client_workspace }} && ./stop_fl.sh
+          - Logs: tail -f {{ flare_home }}/logs/client.log

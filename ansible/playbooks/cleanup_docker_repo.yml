@@ -1,0 +1,46 @@
+---
+- name: Cleanup Docker Repository Configuration
+  hosts: flare_clients
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Stop Docker service if running
+      ansible.builtin.systemd:
+        name: docker
+        state: stopped
+      ignore_errors: yes
+      
+    - name: Remove all Docker repository files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/docker.list
+        - /etc/apt/sources.list.d/docker.sources
+        - /etc/apt/keyrings/docker.asc
+        - /etc/apt/keyrings/docker.gpg
+      ignore_errors: yes
+      
+    - name: Remove Docker GPG keys from apt keyring
+      ansible.builtin.shell: |
+        apt-key del 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 2>/dev/null || true
+        rm -f /usr/share/keyrings/docker-archive-keyring.gpg
+        rm -f /etc/apt/trusted.gpg.d/docker.gpg
+      ignore_errors: yes
+      
+    - name: Clean apt cache
+      ansible.builtin.apt:
+        autoclean: yes
+        autoremove: yes
+      ignore_errors: yes
+      
+    - name: Update apt package index
+      ansible.builtin.apt:
+        update_cache: yes
+        force_apt_get: yes
+      ignore_errors: yes
+      
+    - name: Display cleanup status
+      ansible.builtin.debug:
+        msg: "Docker repository cleanup completed on {{ inventory_hostname }}"

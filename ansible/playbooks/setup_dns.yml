@@ -1,0 +1,27 @@
+---
+- name: Configure DNS Servers on Target Nodes
+  hosts: all 
+  become: yes 
+  gather_facts: yes 
+  collections:
+    - community.general 
+
+  tasks:
+    - name: Create netplan config for DNS
+      ansible.builtin.template:
+        src: ../templates/netplan_config.yaml.j2
+        dest: /etc/netplan/99-custom-dns.yaml
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Apply netplan configuration
+
+  handlers:
+    - name: Apply netplan configuration
+      ansible.builtin.command:
+        cmd: netplan apply
+      notify: Pause after applying netplan # This handler notifies the *next* handler
+
+    - name: Pause after applying netplan
+      ansible.builtin.pause:
+        seconds: 5

@@ -1,0 +1,34 @@
+---
+- name: Set Permanent Static IP on All Nodes
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Find the netplan configuration file
+      ansible.builtin.find:
+        paths: /etc/netplan
+        patterns: '*.yaml'
+      register: netplan_config_file
+
+    - name: Ensure netplan config file was found
+      ansible.builtin.fail:
+        msg: "Could not find a .yaml file in /etc/netplan/"
+      when: not netplan_config_file.files
+
+    - name: Create static IP configuration for eno1
+      ansible.builtin.copy:
+        dest: "{{ netplan_config_file.files[0].path }}"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eno1:
+                dhcp4: no
+                addresses:
+                  - {{ inventory_hostname }}/24
+      register: netplan_config_updated
+      notify: Apply netplan configuration
+
+  handlers:
+    - name: Apply netplan configuration
+      ansible.builtin.command: netplan apply

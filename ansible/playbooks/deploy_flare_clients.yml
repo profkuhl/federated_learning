@@ -1,0 +1,398 @@
+---
+- name: Deploy NVIDIA FLARE Clients
+  hosts: flare_clients
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    flare_user: "{{ ansible_user }}"
+    flare_home: "/home/{{ flare_user }}/nvflare"
+    client_workspace: "{{ flare_home }}/workspace/client"
+    server_host: "192.168.1.7"  # FLARE server IP
+    
+  tasks:
+    - name: Install Python 3.10 and dependencies
+      ansible.builtin.apt:
+        name:
+          - software-properties-common
+          - curl
+        state: present
+        update_cache: yes
+        
+    - name: Install uv package manager
+      ansible.builtin.shell: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+      args:
+        creates: "/home/{{ flare_user }}/.local/bin/uv"
+      become_user: "{{ flare_user }}"
+      
+    - name: Install Python 3.10 with uv
+      ansible.builtin.shell: |
+        source ~/.local/bin/env
+        uv python install 3.10
+      args:
+        creates: "/home/{{ flare_user }}/.local/share/uv/python"
+      become_user: "{{ flare_user }}"
+      
+    - name: Create FLARE directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+      loop:
+        - "{{ flare_home }}"
+        - "{{ flare_home }}/logs"
+        - "{{ flare_home }}/apps"
+        - "{{ client_workspace }}"
+        
+    - name: Create Python virtual environment
+      ansible.builtin.shell: |
+        source ~/.local/bin/env
+        uv venv {{ flare_home }}/venv --python 3.10
+      args:
+        creates: "{{ flare_home }}/venv"
+      become_user: "{{ flare_user }}"
+      
+    - name: Install NVIDIA FLARE in virtual environment
+      ansible.builtin.shell: |
+        source ~/.local/bin/env
+        source {{ flare_home }}/venv/bin/activate
+        uv pip install nvflare==2.4.1 "cryptography<42" torch torchvision
+      become_user: "{{ flare_user }}"
+      
+    - name: Copy client workspace from server
+      ansible.builtin.synchronize:
+        src: "{{ hostvars[groups['flare_server'][0]]['ansible_host'] if ansible_connection != 'local' else '' }}:/home/k3s-server-07/nvflare/workspace/clients/site-{{ groups['flare_clients'].index(inventory_hostname) + 1 }}/"
+        dest: "{{ client_workspace }}/"
+        mode: push
+        delete: yes
+        recursive: yes
+      delegate_to: "{{ groups['flare_server'][0] }}"
+      become_user: "{{ flare_user }}"
+      
+    - name: Set client site name based on inventory position
+      ansible.builtin.set_fact:
+        site_name: "site-{{ groups['flare_clients'].index(inventory_hostname) + 1 }}"
+        
+    - name: Create client startup script
+      ansible.builtin.copy:
+        dest: "{{ client_workspace }}/start.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          # Activate virtual environment
+          source {{ flare_home }}/venv/bin/activate
+          
+          # Set working directory
+          cd {{ client_workspace }}
+          
+          # Start FLARE client
+          echo "Starting NVIDIA FLARE Client ({{ site_name }})..."
+          echo "Working directory: $(pwd)"
+          echo "Python path: $(which python)"
+          echo "FLARE version: $(python -c 'import nvflare; print(nvflare.__version__)')"
+          echo "Connecting to server: {{ server_host }}"
+          
+          # Start the client in background
+          nohup python -u -m nvflare.private.fed.app.client.client_train -m {{ client_workspace }} -s fed_client.json --set secure_train=true uid={{ site_name }} org=nvidia > {{ flare_home }}/logs/client.log 2>&1 &
+          
+          # Save PID
+          mkdir -p {{ client_workspace }}/startup
+          echo $! > {{ client_workspace }}/startup/fl_client.pid
+          
+          echo "NVIDIA FLARE Client started with PID: $(cat {{ client_workspace }}/startup/fl_client.pid)"
+          
+    - name: Create client stop script
+      ansible.builtin.copy:
+        dest: "{{ client_workspace }}/stop_fl.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          PID_FILE="{{ client_workspace }}/startup/fl_client.pid"
+          
+          if [ -f "$PID_FILE" ]; then
+              PID=$(cat "$PID_FILE")
+              echo "Stopping NVIDIA FLARE Client ({{ site_name }}, PID: $PID)..."
+              
+              if kill -0 "$PID" 2>/dev/null; then
+                  kill "$PID"
+                  sleep 5
+                  
+                  if kill -0 "$PID" 2>/dev/null; then
+                      echo "Force killing NVIDIA FLARE Client..."
+                      kill -9 "$PID"
+                  fi
+                  
+                  rm -f "$PID_FILE"
+                  echo "NVIDIA FLARE Client stopped."
+              else
+                  echo "NVIDIA FLARE Client is not running."
+                  rm -f "$PID_FILE"
+              fi
+          else
+              echo "No PID file found. NVIDIA FLARE Client may not be running."
+          fi
+          
+    - name: Create client systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nvflare-client.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=NVIDIA FLARE Client ({{ site_name }})
+          After=network.target
+          Wants=network.target
+          
+          [Service]
+          Type=forking
+          User={{ flare_user }}
+          Group={{ flare_user }}
+          WorkingDirectory={{ client_workspace }}
+          Environment=PATH={{ flare_home }}/venv/bin:/usr/local/bin:/usr/bin:/bin
+          ExecStart={{ client_workspace }}/start.sh
+          ExecStop={{ client_workspace }}/stop_fl.sh
+          PIDFile={{ client_workspace }}/startup/fl_client.pid
+          Restart=always
+          RestartSec=10
+          StandardOutput=append:{{ flare_home }}/logs/client.log
+          StandardError=append:{{ flare_home }}/logs/client-error.log
+          
+          [Install]
+          WantedBy=multi-user.target
+          
+    - name: Create startup directory
+      ansible.builtin.file:
+        path: "{{ client_workspace }}/startup"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        
+    - name: Create CIFAR-10 training application
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/apps/cifar10_trainer.py"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0644'
+        content: |
+          import torch
+          import torch.nn as nn
+          import torch.optim as optim
+          import torchvision
+          import torchvision.transforms as transforms
+          from torch.utils.data import DataLoader
+          import numpy as np
+          import os
+          
+          from nvflare.apis.dxo import DXO, DataKind, MetaKey, from_shareable
+          from nvflare.apis.executor import Executor
+          from nvflare.apis.fl_constant import ReturnCode, ReservedKey
+          from nvflare.apis.fl_context import FLContext
+          from nvflare.apis.shareable import Shareable, make_reply
+          from nvflare.apis.signal import Signal
+          from nvflare.app_common.abstract.model import make_model_learnable, model_learnable_to_dxo
+          from nvflare.app_common.app_constant import AppConstants
+          from nvflare.app_common.app_event_type import AppEventType
+          
+          
+          class SimpleCNN(nn.Module):
+              def __init__(self):
+                  super(SimpleCNN, self).__init__()
+                  self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+                  self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+                  self.pool = nn.MaxPool2d(2, 2)
+                  self.fc1 = nn.Linear(64 * 8 * 8, 128)
+                  self.fc2 = nn.Linear(128, 10)
+                  self.dropout = nn.Dropout(0.5)
+                  
+              def forward(self, x):
+                  x = self.pool(torch.relu(self.conv1(x)))
+                  x = self.pool(torch.relu(self.conv2(x)))
+                  x = x.view(-1, 64 * 8 * 8)
+                  x = torch.relu(self.fc1(x))
+                  x = self.dropout(x)
+                  x = self.fc2(x)
+                  return x
+          
+          
+          class CIFAR10Trainer(Executor):
+              def __init__(self, lr=0.01, epochs=1, train_task_name=AppConstants.TASK_TRAIN):
+                  super().__init__()
+                  
+                  self._lr = lr
+                  self._epochs = epochs
+                  self._train_task_name = train_task_name
+                  
+                  # Model and training setup
+                  self.model = SimpleCNN()
+                  self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                  self.model.to(self.device)
+                  
+                  self.optimizer = optim.SGD(self.model.parameters(), lr=self._lr, momentum=0.9)
+                  self.criterion = nn.CrossEntropyLoss()
+                  
+                  # Data setup - simulate different data distributions per client
+                  transform = transforms.Compose([
+                      transforms.ToTensor(),
+                      transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                  ])
+                  
+                  # Create data directory
+                  data_dir = os.path.join(os.path.expanduser("~"), "nvflare", "data")
+                  os.makedirs(data_dir, exist_ok=True)
+                  
+                  trainset = torchvision.datasets.CIFAR10(
+                      root=data_dir, train=True, download=True, transform=transform
+                  )
+                  
+                  # Simulate federated data split - each client gets a subset
+                  client_id = os.environ.get('FL_CLIENT_ID', '0')
+                  num_clients = 5
+                  if client_id.startswith('site-'):
+                      client_idx = int(client_id.split('-')[1]) - 1
+                  else:
+                      client_idx = 0
+                      
+                  # Split data among clients
+                  data_per_client = len(trainset) // num_clients
+                  start_idx = client_idx * data_per_client
+                  end_idx = start_idx + data_per_client if client_idx < num_clients - 1 else len(trainset)
+                  
+                  client_dataset = torch.utils.data.Subset(trainset, range(start_idx, end_idx))
+                  self.trainloader = DataLoader(client_dataset, batch_size=32, shuffle=True)
+                  
+                  self.log_info(None, f"Client {client_id} initialized with {len(client_dataset)} training samples")
+                  
+              def execute(self, task_name: str, shareable: Shareable, fl_ctx: FLContext, abort_signal: Signal) -> Shareable:
+                  if task_name == self._train_task_name:
+                      return self._train(shareable, fl_ctx, abort_signal)
+                  else:
+                      return make_reply(ReturnCode.TASK_UNKNOWN)
+                      
+              def _train(self, shareable: Shareable, fl_ctx: FLContext, abort_signal: Signal) -> Shareable:
+                  # Get model weights from shareable
+                  dxo = from_shareable(shareable)
+                  global_weights = dxo.data
+                  
+                  # Set local model weights to global
+                  self.model.load_state_dict(global_weights)
+                  
+                  # Training
+                  self.model.train()
+                  total_loss = 0.0
+                  num_batches = 0
+                  
+                  for epoch in range(self._epochs):
+                      epoch_loss = 0.0
+                      epoch_batches = 0
+                      
+                      for i, (inputs, labels) in enumerate(self.trainloader):
+                          if abort_signal.triggered:
+                              return make_reply(ReturnCode.TASK_ABORTED)
+                              
+                          inputs, labels = inputs.to(self.device), labels.to(self.device)
+                          
+                          self.optimizer.zero_grad()
+                          outputs = self.model(inputs)
+                          loss = self.criterion(outputs, labels)
+                          loss.backward()
+                          self.optimizer.step()
+                          
+                          epoch_loss += loss.item()
+                          epoch_batches += 1
+                          num_batches += 1
+                          total_loss += loss.item()
+                          
+                      avg_epoch_loss = epoch_loss / epoch_batches if epoch_batches > 0 else 0
+                      self.log_info(fl_ctx, f'Epoch {epoch + 1}/{self._epochs}, Average Loss: {avg_epoch_loss:.6f}')
+                  
+                  avg_loss = total_loss / num_batches if num_batches > 0 else 0
+                  self.log_info(fl_ctx, f'Training completed. Overall average loss: {avg_loss:.6f}')
+                  
+                  # Return updated model
+                  weights = self.model.state_dict()
+                  dxo = DXO(data_kind=DataKind.WEIGHTS, data=weights)
+                  dxo.set_meta_prop(MetaKey.NUM_STEPS_CURRENT_ROUND, num_batches)
+                  
+                  return dxo.to_shareable()
+          
+    - name: Create client configuration template
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/apps/config_fed_client.json"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0644'
+        content: |
+          {
+            "format_version": 2,
+            "executors": [
+              {
+                "tasks": ["train"],
+                "executor": {
+                  "id": "Executor",
+                  "path": "cifar10_trainer.CIFAR10Trainer",
+                  "args": {
+                    "lr": 0.01,
+                    "epochs": 1
+                  }
+                }
+              }
+            ],
+            "task_result_filters": [],
+            "task_data_filters": []
+          }
+          
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+        
+    - name: Enable NVIDIA FLARE client service
+      ansible.builtin.systemd:
+        name: nvflare-client
+        enabled: yes
+        
+    - name: Check if client configuration exists
+      ansible.builtin.stat:
+        path: "{{ client_workspace }}/fed_client.json"
+      register: client_config
+      
+    - name: Display client deployment status
+      ansible.builtin.debug:
+        msg: |
+          NVIDIA FLARE Client deployment completed!
+          
+          Client site: {{ site_name }}
+          Client workspace: {{ client_workspace }}
+          Configuration file: {{ 'Found' if client_config.stat.exists else 'Not found - may need manual configuration' }}
+          Server connection: {{ server_host }}
+          
+          Service management:
+          - Start: sudo systemctl start nvflare-client
+          - Stop: sudo systemctl stop nvflare-client
+          - Status: sudo systemctl status nvflare-client
+          - Logs: journalctl -u nvflare-client -f
+          - Application logs: tail -f {{ flare_home }}/logs/client.log
+          
+          To start manually:
+          cd {{ client_workspace }} && ./start.sh
+          
+    - name: Verify client workspace contents
+      ansible.builtin.find:
+        paths: "{{ client_workspace }}"
+        patterns: "*.json,*.sh"
+      register: workspace_files
+      
+    - name: List client workspace files
+      ansible.builtin.debug:
+        msg: "Client workspace files: {{ workspace_files.files | map(attribute='path') | map('basename') | list }}"

@@ -1,0 +1,412 @@
+---
+- name: Install NVIDIA FLARE and generate provision package
+  hosts: flare_server
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    flare_version: "2.4.1"
+    project_name: "cifar10_federated"
+    provision_dir: "/opt/nvflare"
+    
+  tasks:
+    - name: Update package cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+        
+    - name: Install Python 3 and pip
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - python3-dev
+        state: present
+        
+    - name: Create NVIDIA FLARE directory
+      ansible.builtin.file:
+        path: "{{ provision_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        
+    - name: Create Python virtual environment for FLARE
+      ansible.builtin.command:
+        cmd: python3 -m venv {{ provision_dir }}/venv
+        creates: "{{ provision_dir }}/venv"
+      become_user: "{{ ansible_user }}"
+      
+    - name: Upgrade pip in virtual environment
+      ansible.builtin.pip:
+        name: pip
+        state: latest
+        virtualenv: "{{ provision_dir }}/venv"
+      become_user: "{{ ansible_user }}"
+      
+    - name: Install NVIDIA FLARE
+      ansible.builtin.pip:
+        name:
+          - "nvflare=={{ flare_version }}"
+          - torch
+          - torchvision
+          - tensorboard
+          - matplotlib
+          - numpy
+          - Pillow
+        virtualenv: "{{ provision_dir }}/venv"
+      become_user: "{{ ansible_user }}"
+      
+    - name: Create project directory
+      ansible.builtin.file:
+        path: "{{ provision_dir }}/{{ project_name }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        
+    - name: Create provision config directory
+      ansible.builtin.file:
+        path: "{{ provision_dir }}/{{ project_name }}/config"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        
+    - name: Generate project.yml configuration
+      ansible.builtin.copy:
+        dest: "{{ provision_dir }}/{{ project_name }}/config/project.yml"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+        content: |
+          name: {{ project_name }}
+          description: CIFAR-10 Federated Learning with NVIDIA FLARE
+          
+          participants:
+            - name: server
+              type: server
+              org: nvidia
+              fed_learn_port: 8002
+              admin_port: 8003
+              
+            - name: site-1
+              type: client
+              org: nvidia
+              
+            - name: site-2
+              type: client
+              org: nvidia
+              
+            - name: site-3
+              type: client
+              org: nvidia
+              
+            - name: site-4
+              type: client
+              org: nvidia
+              
+            - name: site-5
+              type: client
+              org: nvidia
+              
+            - name: admin
+              type: admin
+              org: nvidia
+              
+          builders:
+            - path: nvflare.lighter.impl.workspace.WorkspaceBuilder
+              args:
+                template_file: secure_train
+                
+            - path: nvflare.lighter.impl.template.TemplateBuilder
+            
+            - path: nvflare.lighter.impl.static_file.StaticFileBuilder
+              args:
+                config_folder: config
+                
+            - path: nvflare.lighter.impl.auth_policy.AuthPolicyBuilder
+              args:
+                orgs:
+                  nvidia:
+                    - relaxed
+                    
+            - path: nvflare.lighter.impl.cert.CertBuilder
+            
+            - path: nvflare.lighter.impl.he.HEBuilder
+              args:
+                poly_modulus_degree: 8192
+                coeff_mod_bit_sizes: [60, 40, 40]
+                scale_bits: 40
+                scheme: CKKS
+                
+            - path: nvflare.lighter.impl.signature.SignatureBuilder
+            
+    - name: Create authorization policy file
+      ansible.builtin.copy:
+        dest: "{{ provision_dir }}/{{ project_name }}/config/authorization.json"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+        content: |
+          {
+            "format_version": "1.0",
+            "permissions": {},
+            "roles": {
+              "super": {
+                "desc": "Super user role",
+                "rules": ["*"]
+              },
+              "user": {
+                "desc": "Regular user role",
+                "rules": [
+                  "shell_commands",
+                  "train",
+                  "validate",
+                  "submit_job",
+                  "view_log",
+                  "view_stats"
+                ]
+              }
+            },
+            "users": {
+              "admin@nvidia.com": {
+                "roles": ["super"]
+              }
+            }
+          }
+          
+    - name: Generate provision package
+      ansible.builtin.shell: |
+        cd {{ provision_dir }}/{{ project_name }}
+        {{ provision_dir }}/venv/bin/provision -p {{ provision_dir }}/{{ project_name }}/config/project.yml
+      args:
+        creates: "{{ provision_dir }}/{{ project_name }}/prod_00"
+      become_user: "{{ ansible_user }}"
+      
+    - name: Set permissions on provision package
+      ansible.builtin.file:
+        path: "{{ provision_dir }}/{{ project_name }}/prod_00"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: yes
+        
+    - name: Create FLARE workspace directory
+      ansible.builtin.file:
+        path: "{{ provision_dir }}/workspace"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        
+    - name: Copy server startup package
+      ansible.builtin.copy:
+        src: "{{ provision_dir }}/{{ project_name }}/prod_00/server/"
+        dest: "{{ provision_dir }}/workspace/server/"
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: preserve
+        
+    - name: Copy admin package
+      ansible.builtin.copy:
+        src: "{{ provision_dir }}/{{ project_name }}/prod_00/admin@nvidia.com/"
+        dest: "{{ provision_dir }}/workspace/admin/"
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: preserve
+        
+    - name: Create client packages directory
+      ansible.builtin.file:
+        path: "{{ provision_dir }}/workspace/clients"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        
+    - name: Copy client packages
+      ansible.builtin.copy:
+        src: "{{ provision_dir }}/{{ project_name }}/prod_00/{{ item }}/"
+        dest: "{{ provision_dir }}/workspace/clients/{{ item }}/"
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: preserve
+      loop:
+        - site-1
+        - site-2
+        - site-3
+        - site-4
+        - site-5
+        
+    - name: Create CIFAR-10 training application directory
+      ansible.builtin.file:
+        path: "{{ provision_dir }}/apps/cifar10"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        
+    - name: Create simple CIFAR-10 trainer
+      ansible.builtin.copy:
+        dest: "{{ provision_dir }}/apps/cifar10/cifar10_trainer.py"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+        content: |
+          import torch
+          import torch.nn as nn
+          import torch.optim as optim
+          import torchvision
+          import torchvision.transforms as transforms
+          from torch.utils.data import DataLoader
+          import numpy as np
+          
+          from nvflare.apis.dxo import DXO, DataKind, MetaKey, from_shareable
+          from nvflare.apis.executor import Executor
+          from nvflare.apis.fl_constant import ReturnCode, ReservedKey
+          from nvflare.apis.fl_context import FLContext
+          from nvflare.apis.shareable import Shareable, make_reply
+          from nvflare.apis.signal import Signal
+          from nvflare.app_common.abstract.model import make_model_learnable, model_learnable_to_dxo
+          from nvflare.app_common.app_constant import AppConstants
+          from nvflare.app_common.app_event_type import AppEventType
+          
+          
+          class SimpleCNN(nn.Module):
+              def __init__(self):
+                  super(SimpleCNN, self).__init__()
+                  self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+                  self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+                  self.pool = nn.MaxPool2d(2, 2)
+                  self.fc1 = nn.Linear(64 * 8 * 8, 128)
+                  self.fc2 = nn.Linear(128, 10)
+                  self.dropout = nn.Dropout(0.5)
+                  
+              def forward(self, x):
+                  x = self.pool(torch.relu(self.conv1(x)))
+                  x = self.pool(torch.relu(self.conv2(x)))
+                  x = x.view(-1, 64 * 8 * 8)
+                  x = torch.relu(self.fc1(x))
+                  x = self.dropout(x)
+                  x = self.fc2(x)
+                  return x
+          
+          
+          class CIFAR10Trainer(Executor):
+              def __init__(self, lr=0.01, epochs=1, train_task_name=AppConstants.TASK_TRAIN):
+                  super().__init__()
+                  
+                  self._lr = lr
+                  self._epochs = epochs
+                  self._train_task_name = train_task_name
+                  
+                  # Model and training setup
+                  self.model = SimpleCNN()
+                  self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                  self.model.to(self.device)
+                  
+                  self.optimizer = optim.SGD(self.model.parameters(), lr=self._lr, momentum=0.9)
+                  self.criterion = nn.CrossEntropyLoss()
+                  
+                  # Data setup
+                  transform = transforms.Compose([
+                      transforms.ToTensor(),
+                      transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                  ])
+                  
+                  trainset = torchvision.datasets.CIFAR10(
+                      root='./data', train=True, download=True, transform=transform
+                  )
+                  self.trainloader = DataLoader(trainset, batch_size=32, shuffle=True)
+                  
+              def execute(self, task_name: str, shareable: Shareable, fl_ctx: FLContext, abort_signal: Signal) -> Shareable:
+                  if task_name == self._train_task_name:
+                      return self._train(shareable, fl_ctx, abort_signal)
+                  else:
+                      return make_reply(ReturnCode.TASK_UNKNOWN)
+                      
+              def _train(self, shareable: Shareable, fl_ctx: FLContext, abort_signal: Signal) -> Shareable:
+                  # Get model weights from shareable
+                  dxo = from_shareable(shareable)
+                  global_weights = dxo.data
+                  
+                  # Set local model weights to global
+                  self.model.load_state_dict(global_weights)
+                  
+                  # Training
+                  self.model.train()
+                  for epoch in range(self._epochs):
+                      running_loss = 0.0
+                      for i, (inputs, labels) in enumerate(self.trainloader):
+                          if abort_signal.triggered:
+                              return make_reply(ReturnCode.TASK_ABORTED)
+                              
+                          inputs, labels = inputs.to(self.device), labels.to(self.device)
+                          
+                          self.optimizer.zero_grad()
+                          outputs = self.model(inputs)
+                          loss = self.criterion(outputs, labels)
+                          loss.backward()
+                          self.optimizer.step()
+                          
+                          running_loss += loss.item()
+                          
+                          if i % 100 == 99:
+                              self.log_info(fl_ctx, f'Epoch {epoch + 1}, Batch {i + 1}, Loss: {running_loss / 100:.3f}')
+                              running_loss = 0.0
+                  
+                  # Return updated model
+                  weights = self.model.state_dict()
+                  dxo = DXO(data_kind=DataKind.WEIGHTS, data=weights)
+                  return dxo.to_shareable()
+          
+    - name: Create job configuration
+      ansible.builtin.copy:
+        dest: "{{ provision_dir }}/apps/cifar10/config_fed_client.json"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+        content: |
+          {
+            "format_version": 2,
+            "executors": [
+              {
+                "tasks": ["train"],
+                "executor": {
+                  "id": "Executor",
+                  "path": "cifar10_trainer.CIFAR10Trainer",
+                  "args": {
+                    "lr": 0.01,
+                    "epochs": 1
+                  }
+                }
+              }
+            ],
+            "task_result_filters": [],
+            "task_data_filters": []
+          }
+          
+    - name: Display installation summary
+      ansible.builtin.debug:
+        msg: |
+          NVIDIA FLARE installation completed successfully!
+          
+          Installation details:
+          - FLARE version: {{ flare_version }}
+          - Installation directory: {{ provision_dir }}
+          - Project: {{ project_name }}
+          - Provision package: {{ provision_dir }}/{{ project_name }}/prod_00
+          - Workspace: {{ provision_dir }}/workspace
+          
+          Server package: {{ provision_dir }}/workspace/server
+          Admin package: {{ provision_dir }}/workspace/admin
+          Client packages: {{ provision_dir }}/workspace/clients/site-[1-5]
+          
+          CIFAR-10 application: {{ provision_dir }}/apps/cifar10
+          
+          To activate the environment: source {{ provision_dir }}/venv/bin/activate

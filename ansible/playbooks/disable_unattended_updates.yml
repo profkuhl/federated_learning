@@ -1,0 +1,25 @@
+---
+- name: Disable and remove unattended upgrades
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Stop the unattended-upgrades daily timer
+      ansible.builtin.systemd:
+        name: apt-daily.timer
+        state: stopped
+        enabled: no
+
+    - name: Disable the unattended-upgrades daily timer 
+      ansible.builtin.systemd:
+        name: apt-daily-upgrade.timer
+        state: stopped
+        enabled: no
+
+    - name: Remove athe unattended-upgrades package
+      ansible.builtin.apt:
+        name: unattended-upgrades
+        state: absent
+        purge: yes
+        autoremove: yes
+

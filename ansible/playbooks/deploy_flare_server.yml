@@ -1,0 +1,201 @@
+---
+- name: Deploy NVIDIA FLARE Server
+  hosts: flare_server
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    flare_user: "{{ ansible_user }}"
+    flare_home: "/home/{{ flare_user }}/nvflare"
+    server_workspace: "{{ flare_home }}/workspace/server"
+    
+  tasks:
+    - name: Ensure FLARE directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+      loop:
+        - "{{ flare_home }}/logs"
+        - "{{ flare_home }}/apps"
+        - /etc/systemd/system
+        
+    - name: Copy server workspace (if running locally)
+      ansible.builtin.copy:
+        src: "{{ flare_home }}/workspace/server/"
+        dest: "{{ server_workspace }}/"
+        remote_src: yes
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: preserve
+      when: ansible_connection == 'local'
+      
+    - name: Set execute permissions on server scripts
+      ansible.builtin.file:
+        path: "{{ server_workspace }}/{{ item }}"
+        mode: '0755'
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+      loop:
+        - start.sh
+        - stop_fl.sh
+      ignore_errors: yes
+      
+    - name: Create FLARE server systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nvflare-server.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=NVIDIA FLARE Server
+          After=network.target
+          Wants=network.target
+          
+          [Service]
+          Type=forking
+          User={{ flare_user }}
+          Group={{ flare_user }}
+          WorkingDirectory={{ server_workspace }}
+          Environment=PATH={{ flare_home }}/venv/bin:/usr/local/bin:/usr/bin:/bin
+          ExecStart={{ server_workspace }}/start.sh
+          ExecStop={{ server_workspace }}/stop_fl.sh
+          PIDFile={{ server_workspace }}/startup/fl_server.pid
+          Restart=always
+          RestartSec=10
+          StandardOutput=append:{{ flare_home }}/logs/server.log
+          StandardError=append:{{ flare_home }}/logs/server-error.log
+          
+          [Install]
+          WantedBy=multi-user.target
+          
+    - name: Create FLARE server startup script
+      ansible.builtin.copy:
+        dest: "{{ server_workspace }}/start.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          # Activate virtual environment
+          source {{ flare_home }}/venv/bin/activate
+          
+          # Set working directory
+          cd {{ server_workspace }}
+          
+          # Start FLARE server
+          echo "Starting NVIDIA FLARE Server..."
+          echo "Working directory: $(pwd)"
+          echo "Python path: $(which python)"
+          echo "FLARE version: $(python -c 'import nvflare; print(nvflare.__version__)')"
+          
+          # Start the server in background
+          nohup python -u -m nvflare.private.fed.app.server.server_train -m {{ server_workspace }} -s fed_server.json --set secure_train=true org=nvidia > {{ flare_home }}/logs/server.log 2>&1 &
+          
+          # Save PID
+          echo $! > {{ server_workspace }}/startup/fl_server.pid
+          
+          echo "NVIDIA FLARE Server started with PID: $(cat {{ server_workspace }}/startup/fl_server.pid)"
+          
+    - name: Create FLARE server stop script
+      ansible.builtin.copy:
+        dest: "{{ server_workspace }}/stop_fl.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          PID_FILE="{{ server_workspace }}/startup/fl_server.pid"
+          
+          if [ -f "$PID_FILE" ]; then
+              PID=$(cat "$PID_FILE")
+              echo "Stopping NVIDIA FLARE Server (PID: $PID)..."
+              
+              if kill -0 "$PID" 2>/dev/null; then
+                  kill "$PID"
+                  sleep 5
+                  
+                  if kill -0 "$PID" 2>/dev/null; then
+                      echo "Force killing NVIDIA FLARE Server..."
+                      kill -9 "$PID"
+                  fi
+                  
+                  rm -f "$PID_FILE"
+                  echo "NVIDIA FLARE Server stopped."
+              else
+                  echo "NVIDIA FLARE Server is not running."
+                  rm -f "$PID_FILE"
+              fi
+          else
+              echo "No PID file found. NVIDIA FLARE Server may not be running."
+          fi
+          
+    - name: Create startup directory
+      ansible.builtin.file:
+        path: "{{ server_workspace }}/startup"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+        
+    - name: Enable NVIDIA FLARE server service
+      ansible.builtin.systemd:
+        name: nvflare-server
+        enabled: yes
+        
+    - name: Open firewall ports for FLARE server
+      ansible.builtin.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+        comment: "NVIDIA FLARE Server"
+      loop:
+        - "8002"  # Fed learn port
+        - "8003"  # Admin port
+      ignore_errors: yes
+      
+    - name: Check if server configuration exists
+      ansible.builtin.stat:
+        path: "{{ server_workspace }}/fed_server.json"
+      register: server_config
+      
+    - name: Display server deployment status
+      ansible.builtin.debug:
+        msg: |
+          NVIDIA FLARE Server deployment completed!
+          
+          Server workspace: {{ server_workspace }}
+          Configuration file: {{ 'Found' if server_config.stat.exists else 'Not found - may need manual configuration' }}
+          
+          Service management:
+          - Start: sudo systemctl start nvflare-server
+          - Stop: sudo systemctl stop nvflare-server
+          - Status: sudo systemctl status nvflare-server
+          - Logs: journalctl -u nvflare-server -f
+          - Application logs: tail -f {{ flare_home }}/logs/server.log
+          
+          Server ports:
+          - Federated Learning: 8002
+          - Admin Console: 8003
+          
+          To start manually:
+          cd {{ server_workspace }} && ./start.sh
+          
+    - name: Verify server workspace contents
+      ansible.builtin.find:
+        paths: "{{ server_workspace }}"
+        patterns: "*.json,*.sh"
+      register: workspace_files
+      
+    - name: List server workspace files
+      ansible.builtin.debug:
+        msg: "Server workspace files: {{ workspace_files.files | map(attribute='path') | map('basename') | list }}"

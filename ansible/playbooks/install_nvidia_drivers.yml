@@ -1,0 +1,127 @@
+---
+- name: Install NVIDIA Drivers on Cluster Nodes
+  hosts: nodes
+  become: yes
+  gather_facts: yes
+  vars:
+    nvidia_driver_branch: "latest"
+    nvidia_driver_ubuntu_install_from_cuda_repo: false
+    
+  tasks:    
+    - name: Update package cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+        
+    - name: Check for NVIDIA hardware
+      ansible.builtin.shell: lspci | grep -i nvidia
+      register: nvidia_hardware_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if no NVIDIA hardware detected
+      ansible.builtin.fail:
+        msg: "No NVIDIA hardware detected on {{ inventory_hostname }}"
+      when: nvidia_hardware_check.stdout == ""
+      
+    - name: Display detected NVIDIA hardware
+      ansible.builtin.debug:
+        msg: "Detected NVIDIA hardware: {{ nvidia_hardware_check.stdout_lines }}"
+        
+    - name: Check if NVIDIA driver is already installed
+      ansible.builtin.shell: nvidia-smi
+      register: nvidia_smi_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Display current driver status
+      ansible.builtin.debug:
+        msg: "NVIDIA driver status: {{ 'Already installed' if nvidia_smi_check.rc == 0 else 'Not installed' }}"
+
+- name: Install NVIDIA Driver directly
+  hosts: nodes
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install NVIDIA driver package (latest available) with signed modules
+      ansible.builtin.apt:
+        name: 
+          - nvidia-driver-570
+          - nvidia-dkms-570
+        state: present
+        update_cache: yes
+      register: nvidia_install
+      
+    - name: Blacklist nouveau driver
+      ansible.builtin.lineinfile:
+        path: /etc/modprobe.d/blacklist-nouveau.conf
+        line: "{{ item }}"
+        create: yes
+      with_items:
+        - "blacklist nouveau"
+        - "options nouveau modeset=0"
+      register: blacklist_nouveau
+      
+    - name: Update initramfs
+      ansible.builtin.command: update-initramfs -u
+      when: blacklist_nouveau.changed
+      
+    - name: Add nvidia to modules
+      ansible.builtin.lineinfile:
+        path: /etc/modules
+        line: nvidia
+        create: yes
+        
+    - name: Load nvidia module immediately
+      ansible.builtin.modprobe:
+        name: nvidia
+        state: present
+      ignore_errors: yes
+      
+  post_tasks:
+    - name: Verify NVIDIA driver installation
+      ansible.builtin.shell: nvidia-smi
+      register: post_install_check
+      failed_when: post_install_check.rc != 0
+      changed_when: false
+      
+    - name: Display nvidia-smi output
+      ansible.builtin.debug:
+        msg: "{{ post_install_check.stdout_lines }}"
+        
+    - name: Check if reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+      
+    - name: Reboot nodes if required after NVIDIA driver installation
+      ansible.builtin.reboot:
+        msg: "Rebooting after NVIDIA driver installation"
+        connect_timeout: 10
+        reboot_timeout: 300
+        pre_reboot_delay: 10
+        post_reboot_delay: 30
+      when: reboot_required_file.stat.exists or nvidia_smi_check.rc != 0
+      
+    - name: Wait for nodes to come back online
+      ansible.builtin.wait_for_connection:
+        connect_timeout: 10
+        sleep: 5
+        delay: 10
+        timeout: 300
+      when: reboot_required_file.stat.exists or nvidia_smi_check.rc != 0
+      
+    - name: Final verification - nvidia-smi after reboot
+      ansible.builtin.shell: nvidia-smi
+      register: final_verification
+      failed_when: final_verification.rc != 0
+      changed_when: false
+      
+    - name: Display final nvidia-smi output
+      ansible.builtin.debug:
+        msg: "{{ final_verification.stdout_lines }}"
+        
+    - name: Display installation summary
+      ansible.builtin.debug:
+        msg: "NVIDIA driver installation completed successfully on {{ inventory_hostname }}"

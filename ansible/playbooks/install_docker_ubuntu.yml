@@ -1,0 +1,121 @@
+---
+- name: Install Docker from Ubuntu Repositories
+  hosts: flare_clients
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    docker_users:
+      - "{{ ansible_user }}"
+  
+  tasks:
+    - name: Remove Docker repository from sources
+      ansible.builtin.shell: |
+        sed -i '/download.docker.com/d' /etc/apt/sources.list.d/* 2>/dev/null || true
+        rm -f /etc/apt/sources.list.d/docker*
+        rm -f /etc/apt/keyrings/docker*
+        rm -f /usr/share/keyrings/docker*
+        rm -f /etc/apt/trusted.gpg.d/docker*
+        apt-key del 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 2>/dev/null || true
+        apt-key del 7EA0A9C3F273FCD8 2>/dev/null || true
+        apt-get clean
+        apt-get update
+      ignore_errors: yes
+      
+    - name: Install Docker from Ubuntu repositories
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose
+          - containerd
+        state: present
+        update_cache: yes
+        
+    - name: Start and enable Docker service
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: yes
+        daemon_reload: yes
+        
+    - name: Add users to docker group
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop: "{{ docker_users }}"
+      
+    - name: Create Docker daemon configuration directory
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        mode: '0755'
+        
+    - name: Configure Docker daemon
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "100m",
+              "max-file": "3"
+            },
+            "storage-driver": "overlay2"
+          }
+        mode: '0644'
+      notify: restart docker
+      
+    - name: Restart Docker to apply configuration
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+        
+    - name: Wait for Docker to be ready
+      ansible.builtin.pause:
+        seconds: 3
+        
+    - name: Test Docker installation
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_version
+      changed_when: false
+      
+    - name: Test Docker functionality
+      ansible.builtin.command:
+        cmd: docker run --rm hello-world
+      register: docker_test
+      changed_when: false
+      become_user: "{{ ansible_user }}"
+      
+    - name: Check Docker Compose
+      ansible.builtin.command:
+        cmd: docker-compose --version
+      register: compose_version
+      changed_when: false
+      
+    - name: Display installation results
+      ansible.builtin.debug:
+        msg: |
+          Docker installation completed on {{ inventory_hostname }}!
+          
+          Docker version: {{ docker_version.stdout }}
+          Docker Compose version: {{ compose_version.stdout }}
+          
+          User {{ ansible_user }} added to docker group.
+          Test command successful: {{ docker_test.rc == 0 }}
+          
+          Note: You may need to log out and back in for group changes to take effect.
+          
+          Basic Docker commands:
+          - docker --version
+          - docker info
+          - docker ps
+          - docker images
+          - docker run hello-world
+          
+  handlers:
+    - name: restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted

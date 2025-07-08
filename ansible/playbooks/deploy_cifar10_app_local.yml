@@ -1,0 +1,82 @@
+---
+- name: Deploy CIFAR-10 Federated Learning Application (Local)
+  hosts: flare_server
+  become: no
+  gather_facts: yes
+  connection: local
+  
+  vars:
+    flare_user: "{{ ansible_user }}"
+    flare_home: "/home/{{ flare_user }}/nvflare"
+    app_name: "cifar10_federated"
+    
+  tasks:
+    - name: Create application directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+      loop:
+        - "{{ flare_home }}/jobs"
+        - "{{ flare_home }}/jobs/{{ app_name }}"
+        - "{{ flare_home }}/jobs/{{ app_name }}/app"
+        - "{{ flare_home }}/jobs/{{ app_name }}/app/config"
+        - "{{ flare_home }}/jobs/{{ app_name }}/app/custom"
+        - "{{ flare_home }}/jobs/{{ app_name }}/app/models"
+        
+    - name: Create initial model script
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/jobs/{{ app_name }}/create_model.py"
+        content: |
+          import torch
+          import torch.nn as nn
+          
+          class SimpleCNN(nn.Module):
+              def __init__(self, num_classes=10):
+                  super(SimpleCNN, self).__init__()
+                  self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+                  self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+                  self.pool = nn.MaxPool2d(2, 2)
+                  self.fc1 = nn.Linear(64 * 8 * 8, 128)
+                  self.fc2 = nn.Linear(128, num_classes)
+                  self.dropout = nn.Dropout(0.5)
+                  
+              def forward(self, x):
+                  x = self.pool(torch.relu(self.conv1(x)))
+                  x = self.pool(torch.relu(self.conv2(x)))
+                  x = x.view(-1, 64 * 8 * 8)
+                  x = torch.relu(self.fc1(x))
+                  x = self.dropout(x)
+                  x = self.fc2(x)
+                  return x
+          
+          model = SimpleCNN()
+          model_path = 'app/models/server.pt'
+          torch.save(model.state_dict(), model_path)
+          print(f'Initial model saved to: {model_path}')
+          print(f'Model parameters: {sum(p.numel() for p in model.parameters())}')
+          
+    - name: Generate initial model weights
+      ansible.builtin.shell: |
+        source {{ flare_home }}/venv/bin/activate
+        cd {{ flare_home }}/jobs/{{ app_name }}
+        python create_model.py
+      args:
+        executable: /bin/bash
+      
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: |
+          CIFAR-10 Application setup completed!
+          
+          Job directory: {{ flare_home }}/jobs/{{ app_name }}
+          Initial model created: {{ flare_home }}/jobs/{{ app_name }}/app/models/server.pt
+          
+          The FLARE workspace and provision packages are ready.
+          
+          Next Steps:
+          1. Start FLARE server: cd {{ flare_home }}/workspace/server && ./start.sh
+          2. Deploy clients and start them
+          3. Use admin console to submit jobs

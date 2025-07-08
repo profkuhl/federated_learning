@@ -1,0 +1,98 @@
+---
+- name: Setup Local Docker Registry for Image Distribution
+  hosts: flare_server
+  become: yes
+  vars:
+    registry_port: 5000
+    registry_name: local-registry
+    registry_data_dir: /var/lib/registry
+    
+  tasks:
+    - name: Create registry data directory
+      file:
+        path: "{{ registry_data_dir }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Stop existing registry container if running
+      docker_container:
+        name: "{{ registry_name }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Start local Docker registry
+      docker_container:
+        name: "{{ registry_name }}"
+        image: registry:2
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "{{ registry_port }}:5000"
+        volumes:
+          - "{{ registry_data_dir }}:/var/lib/registry"
+        env:
+          REGISTRY_STORAGE_DELETE_ENABLED: "true"
+
+    - name: Wait for registry to be ready
+      uri:
+        url: "http://localhost:{{ registry_port }}/v2/"
+        method: GET
+        status_code: 200
+      register: registry_check
+      until: registry_check.status == 200
+      retries: 30
+      delay: 2
+
+    - name: Configure Docker daemon for insecure registry
+      copy:
+        content: |
+          {
+            "insecure-registries": ["192.168.1.7:{{ registry_port }}"],
+            "registry-mirrors": ["http://192.168.1.7:{{ registry_port }}"]
+          }
+        dest: /etc/docker/daemon.json
+      notify: restart docker
+
+    - name: Restart Docker daemon
+      systemd:
+        name: docker
+        state: restarted
+        daemon_reload: yes
+
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
+
+- name: Configure clients for local registry
+  hosts: flare_clients
+  become: yes
+  vars:
+    registry_port: 5000
+    registry_host: "192.168.1.7"
+    
+  tasks:
+    - name: Configure Docker daemon for insecure registry on clients
+      copy:
+        content: |
+          {
+            "insecure-registries": ["{{ registry_host }}:{{ registry_port }}"],
+            "registry-mirrors": ["http://{{ registry_host }}:{{ registry_port }}"]
+          }
+        dest: /etc/docker/daemon.json
+      notify: restart docker
+
+    - name: Restart Docker daemon on clients
+      systemd:
+        name: docker
+        state: restarted
+        daemon_reload: yes
+
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted

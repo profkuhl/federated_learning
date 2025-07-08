@@ -1,0 +1,438 @@
+---
+- name: Configure Networking and Firewall Rules for NVIDIA FLARE
+  hosts: nodes
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    server_ip: "192.168.1.7"
+    fed_learn_port: 8002
+    admin_port: 8003
+    
+  tasks:
+    - name: Install UFW firewall
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: yes
+        
+    - name: Reset UFW to default state
+      ansible.builtin.ufw:
+        state: reset
+        
+    - name: Set UFW default policies
+      ansible.builtin.ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: 'incoming', policy: 'deny' }
+        - { direction: 'outgoing', policy: 'allow' }
+        - { direction: 'routed', policy: 'deny' }
+        
+    - name: Allow SSH access
+      ansible.builtin.ufw:
+        rule: allow
+        port: ssh
+        comment: "SSH access"
+        
+    - name: Allow basic network services
+      ansible.builtin.ufw:
+        rule: allow
+        port: "{{ item }}"
+        comment: "Basic network services"
+      loop:
+        - "53"    # DNS
+        - "123"   # NTP
+        - "80"    # HTTP
+        - "443"   # HTTPS
+        
+    - name: Configure server-specific firewall rules
+      block:
+        - name: Allow FLARE federated learning port
+          ansible.builtin.ufw:
+            rule: allow
+            port: "{{ fed_learn_port }}"
+            proto: tcp
+            comment: "NVIDIA FLARE Federated Learning"
+            
+        - name: Allow FLARE admin port
+          ansible.builtin.ufw:
+            rule: allow
+            port: "{{ admin_port }}"
+            proto: tcp
+            comment: "NVIDIA FLARE Admin Console"
+            
+        - name: Allow FLARE ports from client subnet
+          ansible.builtin.ufw:
+            rule: allow
+            from_ip: "192.168.1.0/24"
+            to_port: "{{ item }}"
+            proto: tcp
+            comment: "FLARE from clients"
+          loop:
+            - "{{ fed_learn_port }}"
+            - "{{ admin_port }}"
+            
+      when: inventory_hostname in groups['flare_server']
+      
+    - name: Configure client-specific firewall rules
+      block:
+        - name: Allow outbound connections to FLARE server
+          ansible.builtin.ufw:
+            rule: allow
+            direction: out
+            to_ip: "{{ server_ip }}"
+            to_port: "{{ item }}"
+            proto: tcp
+            comment: "FLARE client to server"
+          loop:
+            - "{{ fed_learn_port }}"
+            - "{{ admin_port }}"
+            
+        - name: Allow Docker/containerd communication
+          ansible.builtin.ufw:
+            rule: allow
+            port: "2376"
+            proto: tcp
+            comment: "Docker daemon"
+            
+      when: inventory_hostname in groups['flare_clients']
+      
+    - name: Allow containerd and container networking
+      ansible.builtin.ufw:
+        rule: allow
+        from_ip: "172.16.0.0/12"
+        comment: "Container networking"
+        
+    - name: Allow Docker bridge network
+      ansible.builtin.ufw:
+        rule: allow
+        from_ip: "172.17.0.0/16"
+        comment: "Docker bridge network"
+        
+    - name: Configure iptables for container networking
+      ansible.builtin.iptables:
+        chain: FORWARD
+        jump: ACCEPT
+        in_interface: docker0
+        out_interface: docker0
+        comment: "Docker inter-container communication"
+      ignore_errors: yes
+      
+    - name: Enable UFW
+      ansible.builtin.ufw:
+        state: enabled
+        logging: 'on'
+        
+    - name: Configure network performance optimizations
+      block:
+        - name: Increase network buffer sizes
+          ansible.builtin.sysctl:
+            name: "{{ item.name }}"
+            value: "{{ item.value }}"
+            sysctl_set: yes
+            reload: yes
+          loop:
+            - { name: 'net.core.rmem_max', value: '16777216' }
+            - { name: 'net.core.wmem_max', value: '16777216' }
+            - { name: 'net.core.rmem_default', value: '16777216' }
+            - { name: 'net.core.wmem_default', value: '16777216' }
+            - { name: 'net.ipv4.tcp_rmem', value: '4096 87380 16777216' }
+            - { name: 'net.ipv4.tcp_wmem', value: '4096 65536 16777216' }
+            - { name: 'net.core.netdev_max_backlog', value: '5000' }
+            
+        - name: Configure TCP keepalive settings
+          ansible.builtin.sysctl:
+            name: "{{ item.name }}"
+            value: "{{ item.value }}"
+            sysctl_set: yes
+            reload: yes
+          loop:
+            - { name: 'net.ipv4.tcp_keepalive_time', value: '120' }
+            - { name: 'net.ipv4.tcp_keepalive_intvl', value: '30' }
+            - { name: 'net.ipv4.tcp_keepalive_probes', value: '3' }
+            
+    - name: Create network troubleshooting script
+      ansible.builtin.copy:
+        dest: "/usr/local/bin/flare-network-check"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          echo "========================================"
+          echo "NVIDIA FLARE Network Connectivity Check"
+          echo "========================================"
+          echo "Host: $(hostname) ($(hostname -I | awk '{print $1}'))"
+          echo "Date: $(date)"
+          echo ""
+          
+          # Basic network info
+          echo "1. Network Configuration:"
+          echo "------------------------"
+          ip route show | head -5
+          echo ""
+          
+          # DNS resolution
+          echo "2. DNS Resolution:"
+          echo "-----------------"
+          if nslookup google.com &>/dev/null; then
+              echo "✓ DNS resolution working"
+          else
+              echo "✗ DNS resolution failed"
+          fi
+          echo ""
+          
+          # Test connectivity to FLARE server
+          echo "3. FLARE Server Connectivity:"
+          echo "-----------------------------"
+          SERVER_IP="{{ server_ip }}"
+          
+          if ping -c 1 $SERVER_IP &>/dev/null; then
+              echo "✓ Server $SERVER_IP is reachable"
+          else
+              echo "✗ Server $SERVER_IP is unreachable"
+          fi
+          
+          # Test FLARE ports
+          {% if inventory_hostname in groups['flare_clients'] %}
+          for port in {{ fed_learn_port }} {{ admin_port }}; do
+              if timeout 5 bash -c "</dev/tcp/$SERVER_IP/$port" &>/dev/null; then
+                  echo "✓ Port $port on server is accessible"
+              else
+                  echo "✗ Port $port on server is not accessible"
+              fi
+          done
+          {% endif %}
+          
+          {% if inventory_hostname in groups['flare_server'] %}
+          for port in {{ fed_learn_port }} {{ admin_port }}; do
+              if netstat -tuln | grep -q ":$port "; then
+                  echo "✓ Port $port is listening"
+              else
+                  echo "✗ Port $port is not listening"
+              fi
+          done
+          {% endif %}
+          
+          echo ""
+          
+          # Container networking
+          echo "4. Container Networking:"
+          echo "-----------------------"
+          if command -v nerdctl &>/dev/null; then
+              if nerdctl version &>/dev/null; then
+                  echo "✓ nerdctl is working"
+              else
+                  echo "✗ nerdctl is not working"
+              fi
+          else
+              echo "✗ nerdctl not installed"
+          fi
+          
+          # Check bridge networks
+          if ip link show docker0 &>/dev/null; then
+              echo "✓ Docker bridge network exists"
+          else
+              echo "? Docker bridge network not found"
+          fi
+          
+          echo ""
+          
+          # Firewall status
+          echo "5. Firewall Status:"
+          echo "------------------"
+          if command -v ufw &>/dev/null; then
+              ufw status | head -10
+          else
+              echo "UFW not installed"
+          fi
+          
+          echo ""
+          echo "========================================"
+          
+    - name: Create network optimization script
+      ansible.builtin.copy:
+        dest: "/usr/local/bin/flare-optimize-network"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          echo "Optimizing network settings for NVIDIA FLARE..."
+          
+          # Increase connection tracking table size
+          echo 'net.netfilter.nf_conntrack_max = 131072' >> /etc/sysctl.conf
+          
+          # Optimize for high-throughput federated learning
+          echo 'net.ipv4.tcp_window_scaling = 1' >> /etc/sysctl.conf
+          echo 'net.ipv4.tcp_timestamps = 1' >> /etc/sysctl.conf
+          echo 'net.ipv4.tcp_sack = 1' >> /etc/sysctl.conf
+          
+          # Apply settings
+          sysctl -p
+          
+          echo "Network optimization completed."
+          
+    - name: Display networking configuration summary
+      ansible.builtin.debug:
+        msg: |
+          ======================================== 
+          NVIDIA FLARE Network Configuration Complete
+          ========================================
+          
+          Host: {{ inventory_hostname }}
+          Role: {{ 'Server' if inventory_hostname in groups['flare_server'] else 'Client' }}
+          IP Address: {{ ansible_default_ipv4.address }}
+          
+          Firewall Rules:
+          {% if inventory_hostname in groups['flare_server'] %}
+          - SSH (22): Open
+          - Fed Learning ({{ fed_learn_port }}): Open
+          - Admin Console ({{ admin_port }}): Open
+          - HTTP/HTTPS (80/443): Open
+          - Container networks: Allowed
+          {% endif %}
+          {% if inventory_hostname in groups['flare_clients'] %}
+          - SSH (22): Open
+          - Outbound to server: Allowed
+          - Container networks: Allowed
+          {% endif %}
+          
+          Network Optimizations:
+          - TCP buffer sizes increased
+          - Connection keepalive configured
+          - Container networking enabled
+          
+          Troubleshooting Tools:
+          - Network check: /usr/local/bin/flare-network-check
+          - Network optimization: /usr/local/bin/flare-optimize-network
+          - Firewall status: ufw status verbose
+          
+          ========================================
+
+- name: Create master deployment script
+  hosts: flare_server
+  become: yes
+  gather_facts: no
+  
+  tasks:
+    - name: Create comprehensive deployment orchestration script
+      ansible.builtin.copy:
+        dest: "/home/{{ ansible_user }}/deploy_flare_cluster.sh"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          ANSIBLE_DIR="/home/{{ ansible_user }}/ansible"
+          INVENTORY="$ANSIBLE_DIR/inventory.ini"
+          
+          echo "========================================"
+          echo "NVIDIA FLARE Cluster Deployment Script"
+          echo "========================================"
+          echo ""
+          
+          if [ ! -f "$INVENTORY" ]; then
+              echo "Error: Inventory file not found at $INVENTORY"
+              exit 1
+          fi
+          
+          echo "Available deployment options:"
+          echo "1. Deploy server only"
+          echo "2. Deploy clients only"
+          echo "3. Deploy CIFAR-10 application"
+          echo "4. Verify cluster"
+          echo "5. Configure networking"
+          echo "6. Full deployment (all steps)"
+          echo "7. Start federated learning test"
+          echo ""
+          
+          read -p "Select option (1-7): " choice
+          
+          cd "$ANSIBLE_DIR"
+          
+          case $choice in
+              1)
+                  echo "Deploying FLARE server..."
+                  ansible-playbook -i "$INVENTORY" playbooks/deploy_flare_server.yml
+                  ;;
+              2)
+                  echo "Deploying FLARE clients..."
+                  ansible-playbook -i "$INVENTORY" playbooks/deploy_flare_clients.yml
+                  ;;
+              3)
+                  echo "Deploying CIFAR-10 application..."
+                  ansible-playbook -i "$INVENTORY" playbooks/deploy_cifar10_app.yml
+                  ;;
+              4)
+                  echo "Verifying cluster..."
+                  ansible-playbook -i "$INVENTORY" playbooks/verify_flare_cluster.yml
+                  ;;
+              5)
+                  echo "Configuring networking..."
+                  ansible-playbook -i "$INVENTORY" playbooks/configure_networking.yml
+                  ;;
+              6)
+                  echo "Full deployment starting..."
+                  echo "Step 1: Deploying server..."
+                  ansible-playbook -i "$INVENTORY" playbooks/deploy_flare_server.yml
+                  echo "Step 2: Deploying clients..."
+                  ansible-playbook -i "$INVENTORY" playbooks/deploy_flare_clients.yml
+                  echo "Step 3: Deploying CIFAR-10 application..."
+                  ansible-playbook -i "$INVENTORY" playbooks/deploy_cifar10_app.yml
+                  echo "Step 4: Configuring networking..."
+                  ansible-playbook -i "$INVENTORY" playbooks/configure_networking.yml
+                  echo "Step 5: Verifying cluster..."
+                  ansible-playbook -i "$INVENTORY" playbooks/verify_flare_cluster.yml
+                  echo "Full deployment completed!"
+                  ;;
+              7)
+                  echo "Starting federated learning test..."
+                  sudo systemctl start nvflare-server
+                  sleep 5
+                  ansible -i "$INVENTORY" flare_clients -b -m systemd -a "name=nvflare-client state=started"
+                  echo ""
+                  echo "Services started. Run the test:"
+                  echo "/home/{{ ansible_user }}/nvflare/test_federated_learning.sh"
+                  ;;
+              *)
+                  echo "Invalid option selected."
+                  exit 1
+                  ;;
+          esac
+          
+          echo ""
+          echo "========================================"
+          echo "Deployment operation completed!"
+          echo "========================================"
+          
+    - name: Display final deployment summary
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          NVIDIA FLARE Cluster Setup Complete!
+          ========================================
+          
+          Master Control Script: /home/{{ ansible_user }}/deploy_flare_cluster.sh
+          
+          All Playbooks Created:
+          ✓ containerd and NVIDIA Container Toolkit installation
+          ✓ NVIDIA FLARE installation and provisioning
+          ✓ FLARE server deployment
+          ✓ FLARE client deployment
+          ✓ CIFAR-10 federated learning application
+          ✓ Cluster verification and testing
+          ✓ Networking and firewall configuration
+          
+          Quick Start:
+          1. Run full deployment: ./deploy_flare_cluster.sh (option 6)
+          2. Test federated learning: ./deploy_flare_cluster.sh (option 7)
+          
+          Management Commands:
+          - Cluster status: ~/nvflare/cluster_status.sh
+          - Network check: /usr/local/bin/flare-network-check
+          - Submit FL job: ~/nvflare/submit_job.sh
+          - Monitor training: ~/nvflare/monitor_job.sh
+          
+          The cluster is ready for federated learning!
+          ========================================

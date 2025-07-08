@@ -1,0 +1,552 @@
+---
+- name: Deploy CIFAR-10 Federated Learning Application
+  hosts: flare_server
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    flare_user: "{{ ansible_user }}"
+    flare_home: "/home/{{ flare_user }}/nvflare"
+    app_name: "cifar10_federated"
+    
+  tasks:
+    - name: Create application directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+      loop:
+        - "{{ flare_home }}/jobs"
+        - "{{ flare_home }}/jobs/{{ app_name }}"
+        - "{{ flare_home }}/jobs/{{ app_name }}/app"
+        - "{{ flare_home }}/jobs/{{ app_name }}/app/config"
+        - "{{ flare_home }}/jobs/{{ app_name }}/app/custom"
+        
+    - name: Create CIFAR-10 training job metadata
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/jobs/{{ app_name }}/meta.json"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0644'
+        content: |
+          {
+            "name": "{{ app_name }}",
+            "resource_spec": {},
+            "deploy_map": {
+              "app": [
+                "@ALL"
+              ]
+            },
+            "min_clients": 3,
+            "mandatory_clients": []
+          }
+          
+    - name: Create server configuration for federated learning
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/jobs/{{ app_name }}/app/config/config_fed_server.json"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0644'
+        content: |
+          {
+            "format_version": 2,
+            "server": {
+              "heart_beat_timeout": 600
+            },
+            "task_data_filters": [],
+            "task_result_filters": [],
+            "components": [
+              {
+                "id": "persistor",
+                "path": "nvflare.app_common.storages.filesystem_storage.FilesystemStorage",
+                "args": {
+                  "root_dir": "models",
+                  "uri_root": "models"
+                }
+              },
+              {
+                "id": "shareable_generator",
+                "path": "nvflare.app_common.shareablegenerators.full_model_shareable_generator.FullModelShareableGenerator",
+                "args": {}
+              },
+              {
+                "id": "aggregator",
+                "path": "nvflare.app_common.aggregators.intime_accumulate_model_aggregator.InTimeAccumulateWeightedAggregator",
+                "args": {
+                  "expected_data_kind": "WEIGHTS"
+                }
+              },
+              {
+                "id": "model_selector",
+                "path": "nvflare.app_common.widgets.intime_model_selector.IntimeModelSelector",
+                "args": {}
+              },
+              {
+                "id": "model_locator",
+                "path": "nvflare.app_common.widgets.model_locator.ModelLocator",
+                "args": {
+                  "model_dir": "models",
+                  "model_name": "server.pt"
+                }
+              }
+            ],
+            "workflows": [
+              {
+                "id": "scatter_and_gather",
+                "path": "nvflare.app_common.workflows.scatter_and_gather.ScatterAndGather",
+                "args": {
+                  "min_clients": 3,
+                  "num_rounds": 5,
+                  "start_round": 0,
+                  "wait_time_after_min_received": 10,
+                  "aggregator_id": "aggregator",
+                  "persistor_id": "persistor",
+                  "shareable_generator_id": "shareable_generator",
+                  "train_task_name": "train",
+                  "train_timeout": 0
+                }
+              }
+            ]
+          }
+          
+    - name: Create client configuration for federated learning
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/jobs/{{ app_name }}/app/config/config_fed_client.json"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0644'
+        content: |
+          {
+            "format_version": 2,
+            "executors": [
+              {
+                "tasks": ["train"],
+                "executor": {
+                  "id": "Executor",
+                  "path": "cifar10_trainer.CIFAR10Trainer",
+                  "args": {
+                    "lr": 0.01,
+                    "epochs": 2
+                  }
+                }
+              }
+            ],
+            "task_result_filters": [],
+            "task_data_filters": []
+          }
+          
+    - name: Copy CIFAR-10 trainer to job directory
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/jobs/{{ app_name }}/app/custom/cifar10_trainer.py"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0644'
+        content: |
+          import torch
+          import torch.nn as nn
+          import torch.optim as optim
+          import torchvision
+          import torchvision.transforms as transforms
+          from torch.utils.data import DataLoader, Subset
+          import numpy as np
+          import os
+          
+          from nvflare.apis.dxo import DXO, DataKind, MetaKey, from_shareable
+          from nvflare.apis.executor import Executor
+          from nvflare.apis.fl_constant import ReturnCode, ReservedKey
+          from nvflare.apis.fl_context import FLContext
+          from nvflare.apis.shareable import Shareable, make_reply
+          from nvflare.apis.signal import Signal
+          from nvflare.app_common.app_constant import AppConstants
+          
+          
+          class SimpleCNN(nn.Module):
+              def __init__(self, num_classes=10):
+                  super(SimpleCNN, self).__init__()
+                  self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+                  self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+                  self.pool = nn.MaxPool2d(2, 2)
+                  self.fc1 = nn.Linear(64 * 8 * 8, 128)
+                  self.fc2 = nn.Linear(128, num_classes)
+                  self.dropout = nn.Dropout(0.5)
+                  
+              def forward(self, x):
+                  x = self.pool(torch.relu(self.conv1(x)))
+                  x = self.pool(torch.relu(self.conv2(x)))
+                  x = x.view(-1, 64 * 8 * 8)
+                  x = torch.relu(self.fc1(x))
+                  x = self.dropout(x)
+                  x = self.fc2(x)
+                  return x
+          
+          
+          class CIFAR10Trainer(Executor):
+              def __init__(self, lr=0.01, epochs=2, train_task_name=AppConstants.TASK_TRAIN):
+                  super().__init__()
+                  
+                  self._lr = lr
+                  self._epochs = epochs
+                  self._train_task_name = train_task_name
+                  
+                  # Model and training setup
+                  self.model = SimpleCNN()
+                  self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                  self.model.to(self.device)
+                  
+                  self.optimizer = optim.SGD(self.model.parameters(), lr=self._lr, momentum=0.9)
+                  self.criterion = nn.CrossEntropyLoss()
+                  
+                  # Setup federated data
+                  self._setup_data()
+                  
+                  self.log_info(None, f"CIFAR10Trainer initialized on device: {self.device}")
+                  self.log_info(None, f"Training parameters - LR: {self._lr}, Epochs: {self._epochs}")
+                  
+              def _setup_data(self):
+                  """Setup CIFAR-10 data with federated splits"""
+                  transform = transforms.Compose([
+                      transforms.ToTensor(),
+                      transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+                  ])
+                  
+                  # Create data directory
+                  data_dir = os.path.join(os.path.expanduser("~"), "nvflare", "data")
+                  os.makedirs(data_dir, exist_ok=True)
+                  
+                  try:
+                      trainset = torchvision.datasets.CIFAR10(
+                          root=data_dir, train=True, download=True, transform=transform
+                      )
+                      
+                      # Simulate federated data distribution
+                      # Each client gets data from specific classes (non-IID)
+                      client_id = os.environ.get('NVFLARE_CLIENT_ID', 'site-1')
+                      
+                      if client_id.startswith('site-'):
+                          site_num = int(client_id.split('-')[1])
+                      else:
+                          site_num = 1
+                          
+                      # Create non-IID data distribution
+                      num_classes_per_client = 4  # Each client gets 4 out of 10 classes
+                      classes_per_client = {
+                          1: [0, 1, 2, 3],      # airplane, automobile, bird, cat
+                          2: [2, 3, 4, 5],      # bird, cat, deer, dog
+                          3: [4, 5, 6, 7],      # deer, dog, frog, horse
+                          4: [6, 7, 8, 9],      # frog, horse, ship, truck
+                          5: [8, 9, 0, 1],      # ship, truck, airplane, automobile
+                      }
+                      
+                      target_classes = classes_per_client.get(site_num, [0, 1, 2, 3])
+                      
+                      # Filter dataset for target classes
+                      indices = []
+                      for idx, (_, label) in enumerate(trainset):
+                          if label in target_classes:
+                              indices.append(idx)
+                      
+                      # Limit data per client for faster training
+                      max_samples_per_client = 2000
+                      if len(indices) > max_samples_per_client:
+                          indices = np.random.choice(indices, max_samples_per_client, replace=False)
+                      
+                      client_dataset = Subset(trainset, indices)
+                      self.trainloader = DataLoader(client_dataset, batch_size=32, shuffle=True)
+                      
+                      self.log_info(None, f"Client {client_id} setup with {len(client_dataset)} samples from classes {target_classes}")
+                      
+                  except Exception as e:
+                      self.log_error(None, f"Error setting up data: {str(e)}")
+                      # Fallback to empty loader
+                      self.trainloader = DataLoader([], batch_size=32)
+                  
+              def execute(self, task_name: str, shareable: Shareable, fl_ctx: FLContext, abort_signal: Signal) -> Shareable:
+                  """Execute the training task"""
+                  if task_name == self._train_task_name:
+                      return self._train(shareable, fl_ctx, abort_signal)
+                  else:
+                      self.log_error(fl_ctx, f"Unknown task: {task_name}")
+                      return make_reply(ReturnCode.TASK_UNKNOWN)
+                      
+              def _train(self, shareable: Shareable, fl_ctx: FLContext, abort_signal: Signal) -> Shareable:
+                  """Perform federated training"""
+                  try:
+                      # Get current round info
+                      current_round = shareable.get_header().get("current_round", 0)
+                      self.log_info(fl_ctx, f"Starting training for round {current_round}")
+                      
+                      # Get model weights from shareable
+                      dxo = from_shareable(shareable)
+                      global_weights = dxo.data
+                      
+                      if global_weights:
+                          self.model.load_state_dict(global_weights)
+                          self.log_info(fl_ctx, "Loaded global model weights")
+                      else:
+                          self.log_info(fl_ctx, "No global weights received, using local initialization")
+                      
+                      # Perform training
+                      self.model.train()
+                      total_loss = 0.0
+                      num_batches = 0
+                      
+                      for epoch in range(self._epochs):
+                          if abort_signal.triggered:
+                              self.log_info(fl_ctx, "Training aborted")
+                              return make_reply(ReturnCode.TASK_ABORTED)
+                          
+                          epoch_loss = 0.0
+                          epoch_batches = 0
+                          
+                          for batch_idx, (inputs, labels) in enumerate(self.trainloader):
+                              if abort_signal.triggered:
+                                  self.log_info(fl_ctx, "Training aborted")
+                                  return make_reply(ReturnCode.TASK_ABORTED)
+                                  
+                              inputs, labels = inputs.to(self.device), labels.to(self.device)
+                              
+                              self.optimizer.zero_grad()
+                              outputs = self.model(inputs)
+                              loss = self.criterion(outputs, labels)
+                              loss.backward()
+                              self.optimizer.step()
+                              
+                              epoch_loss += loss.item()
+                              epoch_batches += 1
+                              total_loss += loss.item()
+                              num_batches += 1
+                              
+                              if batch_idx % 20 == 0:
+                                  self.log_info(fl_ctx, f'Epoch {epoch + 1}/{self._epochs}, Batch {batch_idx}, Loss: {loss.item():.6f}')
+                          
+                          if epoch_batches > 0:
+                              avg_epoch_loss = epoch_loss / epoch_batches
+                              self.log_info(fl_ctx, f'Epoch {epoch + 1} completed. Average loss: {avg_epoch_loss:.6f}')
+                      
+                      if num_batches > 0:
+                          avg_loss = total_loss / num_batches
+                          self.log_info(fl_ctx, f'Training completed. Overall average loss: {avg_loss:.6f}')
+                      else:
+                          self.log_warning(fl_ctx, "No training batches processed")
+                      
+                      # Return updated model weights
+                      weights = self.model.state_dict()
+                      dxo = DXO(data_kind=DataKind.WEIGHTS, data=weights)
+                      dxo.set_meta_prop(MetaKey.NUM_STEPS_CURRENT_ROUND, num_batches)
+                      
+                      self.log_info(fl_ctx, f"Returning model weights after {num_batches} training steps")
+                      return dxo.to_shareable()
+                      
+                  except Exception as e:
+                      self.log_error(fl_ctx, f"Training failed: {str(e)}")
+                      return make_reply(ReturnCode.EXECUTION_EXCEPTION)
+          
+    - name: Create initial server model
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/jobs/{{ app_name }}/create_initial_model.py"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/usr/bin/env python3
+          
+          import torch
+          import torch.nn as nn
+          import os
+          
+          class SimpleCNN(nn.Module):
+              def __init__(self, num_classes=10):
+                  super(SimpleCNN, self).__init__()
+                  self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+                  self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+                  self.pool = nn.MaxPool2d(2, 2)
+                  self.fc1 = nn.Linear(64 * 8 * 8, 128)
+                  self.fc2 = nn.Linear(128, num_classes)
+                  self.dropout = nn.Dropout(0.5)
+                  
+              def forward(self, x):
+                  x = self.pool(torch.relu(self.conv1(x)))
+                  x = self.pool(torch.relu(self.conv2(x)))
+                  x = x.view(-1, 64 * 8 * 8)
+                  x = torch.relu(self.fc1(x))
+                  x = self.dropout(x)
+                  x = self.fc2(x)
+                  return x
+          
+          def create_initial_model():
+              model = SimpleCNN()
+              
+              # Create models directory
+              models_dir = os.path.join(os.path.dirname(__file__), "app", "models")
+              os.makedirs(models_dir, exist_ok=True)
+              
+              # Save initial model
+              model_path = os.path.join(models_dir, "server.pt")
+              torch.save(model.state_dict(), model_path)
+              
+              print(f"Initial model saved to: {model_path}")
+              print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+              
+          if __name__ == "__main__":
+              create_initial_model()
+          
+    - name: Create models directory
+      ansible.builtin.file:
+        path: "{{ flare_home }}/jobs/{{ app_name }}/app/models"
+        state: directory
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        
+    - name: Generate initial model weights
+      ansible.builtin.shell: |
+        source {{ flare_home }}/venv/bin/activate
+        cd {{ flare_home }}/jobs/{{ app_name }}
+        python create_initial_model.py
+      become_user: "{{ flare_user }}"
+      
+    - name: Create job submission script
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/submit_job.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          JOB_NAME="{{ app_name }}"
+          FLARE_HOME="{{ flare_home }}"
+          ADMIN_WORKSPACE="${FLARE_HOME}/workspace/admin"
+          
+          # Check if admin workspace exists
+          if [ ! -d "$ADMIN_WORKSPACE" ]; then
+              echo "Error: Admin workspace not found at $ADMIN_WORKSPACE"
+              echo "Please ensure the FLARE server is deployed and admin console is available."
+              exit 1
+          fi
+          
+          # Check if job exists
+          if [ ! -d "${FLARE_HOME}/jobs/${JOB_NAME}" ]; then
+              echo "Error: Job ${JOB_NAME} not found at ${FLARE_HOME}/jobs/${JOB_NAME}"
+              exit 1
+          fi
+          
+          echo "Submitting federated learning job: ${JOB_NAME}"
+          echo "Job directory: ${FLARE_HOME}/jobs/${JOB_NAME}"
+          echo "Admin workspace: ${ADMIN_WORKSPACE}"
+          echo ""
+          
+          # Activate virtual environment
+          source ${FLARE_HOME}/venv/bin/activate
+          
+          # Submit job using FLARE admin API
+          cd "$ADMIN_WORKSPACE"
+          
+          echo "To submit this job manually, use the admin console:"
+          echo "1. Start admin console: ./start.sh"
+          echo "2. In admin console, run: submit_job ${FLARE_HOME}/jobs/${JOB_NAME}"
+          echo ""
+          echo "Job is ready for submission!"
+          
+    - name: Create job monitoring script
+      ansible.builtin.copy:
+        dest: "{{ flare_home }}/monitor_job.sh"
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          FLARE_HOME="{{ flare_home }}"
+          
+          echo "NVIDIA FLARE Job Monitoring"
+          echo "=========================="
+          echo ""
+          
+          # Check server status
+          echo "1. Server Status:"
+          if systemctl is-active --quiet nvflare-server; then
+              echo "   ✓ FLARE Server is running"
+          else
+              echo "   ✗ FLARE Server is not running"
+              echo "   Start with: sudo systemctl start nvflare-server"
+          fi
+          echo ""
+          
+          # Check client connections
+          echo "2. Client Status:"
+          for host in {{ groups['flare_clients'] | join(' ') }}; do
+              if ping -c 1 $host &> /dev/null; then
+                  echo "   ✓ Client $host is reachable"
+              else
+                  echo "   ✗ Client $host is not reachable"
+              fi
+          done
+          echo ""
+          
+          # Show recent server logs
+          echo "3. Recent Server Logs:"
+          tail -n 10 ${FLARE_HOME}/logs/server.log 2>/dev/null || echo "   No server logs found"
+          echo ""
+          
+          # Show job directory
+          echo "4. Available Jobs:"
+          if [ -d "${FLARE_HOME}/jobs" ]; then
+              ls -la ${FLARE_HOME}/jobs/ | grep "^d" | awk '{print "   " $9}' | grep -v "^\.$\|^\..$"
+          else
+              echo "   No jobs directory found"
+          fi
+          echo ""
+          
+          echo "For detailed monitoring:"
+          echo "- Server logs: tail -f ${FLARE_HOME}/logs/server.log"
+          echo "- Service status: sudo systemctl status nvflare-server"
+          echo "- Admin console: cd ${FLARE_HOME}/workspace/admin && ./start.sh"
+          
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: |
+          CIFAR-10 Federated Learning Application Deployed Successfully!
+          
+          Application Details:
+          - Job Name: {{ app_name }}
+          - Job Directory: {{ flare_home }}/jobs/{{ app_name }}
+          - Initial Model: Created with SimpleCNN architecture
+          - Training Rounds: 5
+          - Minimum Clients: 3
+          - Epochs per Round: 2
+          
+          Management Scripts:
+          - Submit Job: {{ flare_home }}/submit_job.sh
+          - Monitor Status: {{ flare_home }}/monitor_job.sh
+          
+          Next Steps:
+          1. Ensure FLARE server is running: sudo systemctl start nvflare-server
+          2. Deploy and start FLARE clients on all client nodes
+          3. Submit the federated learning job using admin console
+          4. Monitor training progress through logs and admin interface
+          
+          Admin Console Access:
+          cd {{ flare_home }}/workspace/admin && ./start.sh
+          
+          Job Structure:
+          {{ flare_home }}/jobs/{{ app_name }}/
+          ├── meta.json (job metadata)
+          ├── app/
+          │   ├── config/
+          │   │   ├── config_fed_server.json
+          │   │   └── config_fed_client.json
+          │   ├── custom/
+          │   │   └── cifar10_trainer.py
+          │   └── models/
+          │       └── server.pt (initial model)
+          
+    - name: Set environment variable for job submission
+      ansible.builtin.lineinfile:
+        path: "/home/{{ flare_user }}/.bashrc"
+        line: "export NVFLARE_JOB_DIR={{ flare_home }}/jobs"
+        create: yes
+        owner: "{{ flare_user }}"
+        group: "{{ flare_user }}"
