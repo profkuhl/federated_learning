@@ -1,0 +1,146 @@
+---
+- name: 0. Configure Docker User and Service
+  hosts: all
+  become: yes
+  tasks:
+    - name: Ensure remote user is in the 'docker' group for permissions
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Ensure Docker service is started and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: yes
+
+- name: 1. Provision Project and Deploy Server
+  hosts: nvflare_server
+  vars:
+    provision_venv_path: "/opt/nvflare_provision_venv"
+    build_context_path: "/tmp/nvflare_build_context"
+    workspace_path: "{{ playbook_dir }}/../example_docker_project"
+  tasks:
+    - name: Ensure Python venv package is installed
+      become: yes
+      ansible.builtin.apt:
+        name: python3-venv
+        state: present
+
+    - name: Create a virtual environment for provisioning
+      become: yes
+      ansible.builtin.command:
+        cmd: "python3 -m venv {{ provision_venv_path }}"
+        creates: "{{ provision_venv_path }}/bin/pip"
+
+    - name: Ensure correct ownership of the venv directory
+      become: yes
+      ansible.builtin.file:
+        path: "{{ provision_venv_path }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: yes
+
+    - name: Install NVFlare wheel into the virtual environment
+      ansible.builtin.pip:
+        name: nvflare
+        virtualenv: "{{ provision_venv_path }}"
+
+    - name: Create a clean directory for the Docker build context
+      ansible.builtin.file:
+        path: "{{ build_context_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy the Dockerfile to the clean build context
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../Dockerfile"
+        dest: "{{ build_context_path }}/Dockerfile"
+
+    - name: Build the custom NVFlare Docker image locally
+      community.docker.docker_image:
+        name: nvflare-pt-docker
+        tag: latest
+        build:
+          path: "{{ build_context_path }}"
+        source: build
+        force_source: yes
+      
+    - name: Provision the NVFlare project
+      ansible.builtin.command:
+        cmd: "{{ provision_venv_path }}/bin/nvflare provision -p project.yml -w {{ workspace_path }}"
+        chdir: "{{ playbook_dir }}/.."
+      args:
+        creates: "{{ workspace_path }}"
+
+    - name: Create server workspace directory
+      ansible.builtin.file:
+        path: "{{ nvflare_workspace_dir }}/mylocalhost"
+        state: directory
+        mode: '0755'
+
+    - name: Copy server startup kit
+      ansible.builtin.copy:
+        src: "{{ workspace_path }}/nvflare_with_docker_project/prod_00/mylocalhost/"
+        dest: "{{ nvflare_workspace_dir }}/mylocalhost/"
+        remote_src: yes
+        
+    - name: Start the server container in detached mode
+      ansible.builtin.command:
+        # FINAL FIX: Call the script with the '-d' flag as intended by NVFlare's docs.
+        cmd: "./docker.sh -d"
+        chdir: "{{ nvflare_workspace_dir }}/mylocalhost/startup/"
+
+- name: 2. Build Image and Deploy Clients
+  hosts: nvflare_clients
+  vars:
+    build_context_path: "/tmp/nvflare_build_context"
+    workspace_path: "{{ playbook_dir }}/../example_docker_project"
+  tasks:
+    - name: Create a clean directory for the Docker build context
+      ansible.builtin.file:
+        path: "{{ build_context_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy the Dockerfile to the clean build context
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../Dockerfile"
+        dest: "{{ build_context_path }}/Dockerfile"
+
+    - name: Build the custom NVFlare Docker image locally on the client
+      community.docker.docker_image:
+        name: nvflare-pt-docker
+        tag: latest
+        build:
+          path: "{{ build_context_path }}"
+        source: build
+        force_source: yes
+
+    - name: Create client workspace directory
+      ansible.builtin.file:
+        path: "{{ nvflare_workspace_dir }}/{{ inventory_hostname }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy client startup kit from the server
+      ansible.builtin.copy:
+        src: "{{ workspace_path }}/nvflare_with_docker_project/prod_00/{{ inventory_hostname }}/"
+        dest: "{{ nvflare_workspace_dir }}/{{ inventory_hostname }}/"
+        remote_src: yes
+      delegate_to: "{{ groups['nvflare_server'][0] }}"
+    
+    - name: Add server mapping to client's docker script
+      ansible.builtin.lineinfile:
+        path: "{{ nvflare_workspace_dir }}/{{ inventory_hostname }}/startup/docker.sh"
+        regexp: '^(\s*)docker run'
+        line: '\1docker run --add-host=mylocalhost:{{ nvflare_server_ip }}'
+        backrefs: yes
+
+    - name: Start the client container in detached mode
+      ansible.builtin.command:
+        # FINAL FIX: Call the script with the '-d' flag here as well.
+        cmd: "./docker.sh -d"
+        chdir: "{{ nvflare_workspace_dir }}/{{ inventory_hostname }}/startup/"

@@ -1,0 +1,81 @@
+---
+- name: Build Docker Image and Push to Local Registry
+  hosts: localhost
+  connection: local
+  vars:
+    dockerfile_path: "{{ playbook_dir }}/../../build"
+    image_name: "nvflare-cluster"
+    image_tag: "latest"
+    registry_host: "192.168.1.7"
+    registry_port: 5000
+    local_image: "{{ image_name }}:{{ image_tag }}"
+    registry_image: "{{ registry_host }}:{{ registry_port }}/{{ image_name }}:{{ image_tag }}"
+    
+  tasks:
+    - name: Check if Dockerfile exists
+      stat:
+        path: "{{ dockerfile_path }}/Dockerfile"
+      register: dockerfile_stat
+      
+    - name: Fail if Dockerfile not found
+      fail:
+        msg: "Dockerfile not found at {{ dockerfile_path }}/Dockerfile"
+      when: not dockerfile_stat.stat.exists
+
+    - name: Create build log directory
+      file:
+        path: "{{ ansible_user_dir }}/docker_build_logs"
+        state: directory
+        mode: '0755'
+
+    - name: Build Docker image
+      docker_image:
+        build:
+          path: "{{ dockerfile_path }}"
+          pull: yes
+        name: "{{ local_image }}"
+        tag: "{{ image_tag }}"
+        source: build
+        force_source: yes
+        timeout: 3600
+      register: build_result
+      
+    - name: Log successful build
+      copy:
+        content: |
+          Build completed successfully at {{ ansible_date_time.iso8601 }}
+          Image: {{ local_image }}
+          Image ID: {{ build_result.image.Id }}
+        dest: "{{ ansible_user_dir }}/docker_build_logs/build_success_{{ ansible_date_time.epoch }}.log"
+        
+    - name: Tag image for local registry
+      docker_image:
+        name: "{{ local_image }}"
+        repository: "{{ registry_image }}"
+        source: local
+        
+    - name: Push image to local registry
+      docker_image:
+        name: "{{ registry_image }}"
+        push: yes
+        source: local
+      register: push_result
+      
+    - name: Verify image in registry
+      uri:
+        url: "http://{{ registry_host }}:{{ registry_port }}/v2/{{ image_name }}/tags/list"
+        method: GET
+        status_code: 200
+      register: registry_verify
+      
+    - name: Display success message
+      debug:
+        msg: |
+          Docker image successfully built and pushed to registry!
+          Image: {{ registry_image }}
+          Registry verification: {{ registry_verify.json }}
+          
+          Next steps:
+          1. Configure client nodes for registry access
+          2. Run distribution playbook to pull image on all nodes
+          3. Verify with: docker images {{ local_image }}

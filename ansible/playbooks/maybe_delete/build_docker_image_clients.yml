@@ -1,0 +1,222 @@
+---
+- name: Build NVIDIA FLARE PyTorch Docker Image on All Nodes
+  hosts: nodes  # Target all nodes (server and clients)
+  become: yes
+  gather_facts: yes
+  serial: 2  # Build on 2 nodes at a time to avoid overwhelming the network
+  
+  vars:
+    docker_build_dir: "/tmp/docker_build"
+    docker_image_name: "nvflare-pt"  # As per NVIDIA FLARE documentation
+    docker_image_tag: "latest"
+    build_timeout: 3600  # 1 hour timeout for large image builds
+    max_retries: 3
+    workspace_dir: "/workspace/my-workspace"  # Container workspace directory
+    
+  tasks:
+    - name: Check if Docker is installed and running
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+      register: docker_service
+      failed_when: false
+      
+    - name: Fail if Docker is not available
+      ansible.builtin.fail:
+        msg: "Docker service is not running on {{ inventory_hostname }}"
+      when: docker_service.failed
+      
+    - name: Check for NVIDIA Container Toolkit (for GPU support)
+      ansible.builtin.command: nvidia-container-cli --version
+      register: nvidia_container_toolkit
+      failed_when: false
+      changed_when: false
+      
+    - name: Display GPU support status
+      ansible.builtin.debug:
+        msg: |
+          GPU Support Status on {{ inventory_hostname }}:
+          {% if nvidia_container_toolkit.rc == 0 %}
+          ✅ NVIDIA Container Toolkit installed: {{ nvidia_container_toolkit.stdout }}
+          {% else %}
+          ⚠️  NVIDIA Container Toolkit not found - containers will run in CPU-only mode
+          {% endif %}
+          
+    - name: Check available GPU devices
+      ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+      register: gpu_info
+      failed_when: false
+      changed_when: false
+      when: nvidia_container_toolkit.rc == 0
+      
+    - name: Display GPU information
+      ansible.builtin.debug:
+        msg: |
+          Available GPUs on {{ inventory_hostname }}:
+          {{ gpu_info.stdout }}
+      when: nvidia_container_toolkit.rc == 0 and gpu_info.rc == 0
+      
+    - name: Create Docker build directory
+      ansible.builtin.file:
+        path: "{{ docker_build_dir }}"
+        state: directory
+        mode: '0755'
+        
+    - name: Copy Dockerfile to client nodes
+      ansible.builtin.copy:
+        src: "../../build/Dockerfile"
+        dest: "{{ docker_build_dir }}/Dockerfile"
+        mode: '0644'
+        backup: yes
+      register: dockerfile_copy
+      
+    - name: Display build information
+      ansible.builtin.debug:
+        msg: |
+          Starting Docker build on {{ inventory_hostname }}
+          Image: {{ docker_image_name }}:{{ docker_image_tag }}
+          Build directory: {{ docker_build_dir }}
+          Timeout: {{ build_timeout }} seconds
+          Max retries: {{ max_retries }}
+          
+    - name: Get user primary group
+      ansible.builtin.shell: "id -gn {{ ansible_user }}"
+      register: user_primary_group
+      changed_when: false
+      tags: [workspace]
+      
+    - name: Create workspace directory for container usage
+      ansible.builtin.file:
+        path: "{{ workspace_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ user_primary_group.stdout }}"
+      tags: [workspace]
+      
+    - name: Build NVIDIA FLARE PyTorch Docker image with retry logic
+      ansible.builtin.shell: |
+        cd {{ docker_build_dir }}
+        docker build \
+          --tag {{ docker_image_name }}:{{ docker_image_tag }} \
+          --progress=plain \
+          --no-cache \
+          -f Dockerfile \
+          .
+      register: docker_build_result
+      async: "{{ build_timeout }}"
+      poll: 30  # Check every 30 seconds
+      retries: "{{ max_retries }}"
+      delay: 60  # Wait 1 minute between retries
+      until: docker_build_result.rc == 0
+      failed_when: false
+      when: not ansible_check_mode
+      
+    - name: Set default build result for check mode
+      ansible.builtin.set_fact:
+        docker_build_result: {"rc": 0, "stdout": "Check mode - build skipped", "stderr": ""}
+      when: ansible_check_mode
+      
+    - name: Check build status and display results
+      ansible.builtin.debug:
+        msg: |
+          Build status on {{ inventory_hostname }}: {{ 'SUCCESS' if docker_build_result.rc == 0 else 'FAILED' }}
+          Return code: {{ docker_build_result.rc }}
+          {% if docker_build_result.stdout is defined %}
+          Build output (last 50 lines):
+          {{ docker_build_result.stdout.split('\n')[-50:] | join('\n') }}
+          {% endif %}
+          {% if docker_build_result.stderr is defined and docker_build_result.stderr != '' %}
+          Build errors:
+          {{ docker_build_result.stderr }}
+          {% endif %}
+          
+    - name: Verify Docker image was created
+      ansible.builtin.shell: "docker images {{ docker_image_name }}:{{ docker_image_tag }} --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}'"
+      register: image_verification
+      when: docker_build_result.rc == 0
+      
+    - name: Display image information
+      ansible.builtin.debug:
+        msg: |
+          Docker image verification on {{ inventory_hostname }}:
+          {{ image_verification.stdout }}
+      when: docker_build_result.rc == 0 and image_verification.stdout is defined
+      
+    - name: Clean up build directory (optional)
+      ansible.builtin.file:
+        path: "{{ docker_build_dir }}"
+        state: absent
+      when: docker_build_result.rc == 0
+      tags: [cleanup]
+      
+    - name: Report build failure
+      ansible.builtin.fail:
+        msg: |
+          Docker build failed on {{ inventory_hostname }} after {{ max_retries }} attempts.
+          Last error: {{ docker_build_result.stderr | default('Unknown error') }}
+          Please check the Docker daemon logs and try again.
+      when: docker_build_result.rc != 0
+      
+    - name: Test container run capability (dry run)
+      ansible.builtin.shell: |
+        {% if nvidia_container_toolkit.rc == 0 %}
+        docker run --rm --gpus all \
+          --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+          {{ docker_image_name }}:{{ docker_image_tag }} \
+          python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')"
+        {% else %}
+        docker run --rm \
+          --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+          {{ docker_image_name }}:{{ docker_image_tag }} \
+          python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+        {% endif %}
+      register: container_test
+      when: docker_build_result.rc == 0
+      failed_when: false
+      
+    - name: Display container test results
+      ansible.builtin.debug:
+        msg: |
+          Container Test Results on {{ inventory_hostname }}:
+          {{ container_test.stdout }}
+          {% if container_test.stderr %}
+          Errors: {{ container_test.stderr }}
+          {% endif %}
+      when: docker_build_result.rc == 0 and container_test is defined
+      
+  post_tasks:
+    - name: Summary of build results
+      ansible.builtin.debug:
+        msg: |
+          =============================================================
+          NVIDIA FLARE PyTorch Docker Build Summary for {{ inventory_hostname }}
+          =============================================================
+          Status: {{ 'SUCCESS' if docker_build_result.rc == 0 else 'FAILED' }}
+          Image: {{ docker_image_name }}:{{ docker_image_tag }}
+          GPU Support: {{ 'Available' if nvidia_container_toolkit.rc == 0 else 'CPU Only' }}
+          Workspace: {{ workspace_dir }}
+          Container Test: {{ 'PASSED' if (container_test is defined and container_test.rc == 0) else 'SKIPPED/FAILED' }}
+          =============================================================
+          
+          {% if docker_build_result.rc == 0 %}
+          🚀 Ready to run containers with:
+          {% if nvidia_container_toolkit.rc == 0 %}
+          docker run --rm -it --gpus all \
+            --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v {{ workspace_dir }}:/workspace/my-workspace \
+            {{ docker_image_name }}:{{ docker_image_tag }}
+          {% else %}
+          docker run --rm -it \
+            --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v {{ workspace_dir }}:/workspace/my-workspace \
+            {{ docker_image_name }}:{{ docker_image_tag }}
+          {% endif %}
+          {% endif %}
+      run_once: false
+      
+  handlers:
+    - name: restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted

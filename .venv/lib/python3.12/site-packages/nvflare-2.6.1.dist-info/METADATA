@@ -1,0 +1,280 @@
+Metadata-Version: 2.4
+Name: nvflare
+Version: 2.6.1
+Summary: Federated Learning Application Runtime Environment
+Home-page: https://github.com/NVIDIA/NVFlare
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: POSIX :: Linux
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown; charset=UTF-8
+License-File: LICENSE
+Requires-Dist: cryptography>=36.0.0
+Requires-Dist: Flask==3.0.2
+Requires-Dist: Werkzeug>=3.0.3
+Requires-Dist: Flask-JWT-Extended==4.6.0
+Requires-Dist: Flask-SQLAlchemy==3.1.1
+Requires-Dist: SQLAlchemy==2.0.16
+Requires-Dist: grpcio>=1.62.1
+Requires-Dist: gunicorn>=22.0.0
+Requires-Dist: numpy
+Requires-Dist: protobuf>=4.24.4
+Requires-Dist: psutil>=5.9.1
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: requests>=2.28.0
+Requires-Dist: six>=1.15.0
+Requires-Dist: msgpack>=1.0.3
+Requires-Dist: docker>=6.0
+Requires-Dist: aiohttp
+Requires-Dist: pyhocon
+Provides-Extra: he
+Requires-Dist: tenseal==0.3.15; extra == "he"
+Provides-Extra: psi
+Requires-Dist: openmined.psi==2.0.5; extra == "psi"
+Provides-Extra: pt
+Requires-Dist: torch; extra == "pt"
+Requires-Dist: torchvision; extra == "pt"
+Provides-Extra: sklearn
+Requires-Dist: scikit-learn; extra == "sklearn"
+Requires-Dist: pandas>=1.5.1; extra == "sklearn"
+Provides-Extra: tracking
+Requires-Dist: mlflow; extra == "tracking"
+Requires-Dist: wandb; extra == "tracking"
+Requires-Dist: tensorboard; extra == "tracking"
+Provides-Extra: monitoring
+Requires-Dist: datadog; extra == "monitoring"
+Provides-Extra: config
+Requires-Dist: omegaconf; extra == "config"
+Provides-Extra: app-opt
+Requires-Dist: tenseal==0.3.15; extra == "app-opt"
+Requires-Dist: openmined.psi==2.0.5; extra == "app-opt"
+Requires-Dist: torch; extra == "app-opt"
+Requires-Dist: torchvision; extra == "app-opt"
+Requires-Dist: scikit-learn; extra == "app-opt"
+Requires-Dist: pandas>=1.5.1; extra == "app-opt"
+Requires-Dist: mlflow; extra == "app-opt"
+Requires-Dist: wandb; extra == "app-opt"
+Requires-Dist: tensorboard; extra == "app-opt"
+Requires-Dist: datadog; extra == "app-opt"
+Requires-Dist: pytorch_lightning; extra == "app-opt"
+Requires-Dist: xgboost; extra == "app-opt"
+Requires-Dist: bitsandbytes; extra == "app-opt"
+Provides-Extra: app-opt-mac
+Requires-Dist: torch; extra == "app-opt-mac"
+Requires-Dist: torchvision; extra == "app-opt-mac"
+Requires-Dist: scikit-learn; extra == "app-opt-mac"
+Requires-Dist: pandas>=1.5.1; extra == "app-opt-mac"
+Requires-Dist: mlflow; extra == "app-opt-mac"
+Requires-Dist: wandb; extra == "app-opt-mac"
+Requires-Dist: tensorboard; extra == "app-opt-mac"
+Provides-Extra: core-opt
+Requires-Dist: omegaconf; extra == "core-opt"
+Provides-Extra: doc
+Requires-Dist: sphinx>=4.1.1; extra == "doc"
+Requires-Dist: sphinx_rtd_theme; extra == "doc"
+Requires-Dist: recommonmark; extra == "doc"
+Requires-Dist: sphinx-copybutton; extra == "doc"
+Requires-Dist: sphinxcontrib-jquery; extra == "doc"
+Provides-Extra: all
+Requires-Dist: omegaconf; extra == "all"
+Requires-Dist: tenseal==0.3.15; extra == "all"
+Requires-Dist: openmined.psi==2.0.5; extra == "all"
+Requires-Dist: torch; extra == "all"
+Requires-Dist: torchvision; extra == "all"
+Requires-Dist: scikit-learn; extra == "all"
+Requires-Dist: pandas>=1.5.1; extra == "all"
+Requires-Dist: mlflow; extra == "all"
+Requires-Dist: wandb; extra == "all"
+Requires-Dist: tensorboard; extra == "all"
+Requires-Dist: datadog; extra == "all"
+Requires-Dist: pytorch_lightning; extra == "all"
+Requires-Dist: xgboost; extra == "all"
+Requires-Dist: bitsandbytes; extra == "all"
+Provides-Extra: all-mac
+Requires-Dist: omegaconf; extra == "all-mac"
+Requires-Dist: torch; extra == "all-mac"
+Requires-Dist: torchvision; extra == "all-mac"
+Requires-Dist: scikit-learn; extra == "all-mac"
+Requires-Dist: pandas>=1.5.1; extra == "all-mac"
+Requires-Dist: mlflow; extra == "all-mac"
+Requires-Dist: wandb; extra == "all-mac"
+Requires-Dist: tensorboard; extra == "all-mac"
+Provides-Extra: test-support
+Requires-Dist: isort==5.13.2; extra == "test-support"
+Requires-Dist: flake8==7.1.1; extra == "test-support"
+Requires-Dist: black==24.8.0; extra == "test-support"
+Requires-Dist: click==8.1.7; extra == "test-support"
+Requires-Dist: pytest-xdist==3.6.1; extra == "test-support"
+Requires-Dist: pytest-cov==5.0.0; extra == "test-support"
+Requires-Dist: pandas>=1.5.1; extra == "test-support"
+Provides-Extra: test
+Requires-Dist: omegaconf; extra == "test"
+Requires-Dist: tenseal==0.3.15; extra == "test"
+Requires-Dist: openmined.psi==2.0.5; extra == "test"
+Requires-Dist: torch; extra == "test"
+Requires-Dist: torchvision; extra == "test"
+Requires-Dist: scikit-learn; extra == "test"
+Requires-Dist: pandas>=1.5.1; extra == "test"
+Requires-Dist: mlflow; extra == "test"
+Requires-Dist: wandb; extra == "test"
+Requires-Dist: tensorboard; extra == "test"
+Requires-Dist: datadog; extra == "test"
+Requires-Dist: pytorch_lightning; extra == "test"
+Requires-Dist: xgboost; extra == "test"
+Requires-Dist: bitsandbytes; extra == "test"
+Requires-Dist: isort==5.13.2; extra == "test"
+Requires-Dist: flake8==7.1.1; extra == "test"
+Requires-Dist: black==24.8.0; extra == "test"
+Requires-Dist: click==8.1.7; extra == "test"
+Requires-Dist: pytest-xdist==3.6.1; extra == "test"
+Requires-Dist: pytest-cov==5.0.0; extra == "test"
+Requires-Dist: pandas>=1.5.1; extra == "test"
+Provides-Extra: test-mac
+Requires-Dist: omegaconf; extra == "test-mac"
+Requires-Dist: torch; extra == "test-mac"
+Requires-Dist: torchvision; extra == "test-mac"
+Requires-Dist: scikit-learn; extra == "test-mac"
+Requires-Dist: pandas>=1.5.1; extra == "test-mac"
+Requires-Dist: mlflow; extra == "test-mac"
+Requires-Dist: wandb; extra == "test-mac"
+Requires-Dist: tensorboard; extra == "test-mac"
+Requires-Dist: isort==5.13.2; extra == "test-mac"
+Requires-Dist: flake8==7.1.1; extra == "test-mac"
+Requires-Dist: black==24.8.0; extra == "test-mac"
+Requires-Dist: click==8.1.7; extra == "test-mac"
+Requires-Dist: pytest-xdist==3.6.1; extra == "test-mac"
+Requires-Dist: pytest-cov==5.0.0; extra == "test-mac"
+Requires-Dist: pandas>=1.5.1; extra == "test-mac"
+Provides-Extra: dev
+Requires-Dist: sphinx>=4.1.1; extra == "dev"
+Requires-Dist: sphinx_rtd_theme; extra == "dev"
+Requires-Dist: recommonmark; extra == "dev"
+Requires-Dist: sphinx-copybutton; extra == "dev"
+Requires-Dist: sphinxcontrib-jquery; extra == "dev"
+Requires-Dist: omegaconf; extra == "dev"
+Requires-Dist: tenseal==0.3.15; extra == "dev"
+Requires-Dist: openmined.psi==2.0.5; extra == "dev"
+Requires-Dist: torch; extra == "dev"
+Requires-Dist: torchvision; extra == "dev"
+Requires-Dist: scikit-learn; extra == "dev"
+Requires-Dist: pandas>=1.5.1; extra == "dev"
+Requires-Dist: mlflow; extra == "dev"
+Requires-Dist: wandb; extra == "dev"
+Requires-Dist: tensorboard; extra == "dev"
+Requires-Dist: datadog; extra == "dev"
+Requires-Dist: pytorch_lightning; extra == "dev"
+Requires-Dist: xgboost; extra == "dev"
+Requires-Dist: bitsandbytes; extra == "dev"
+Requires-Dist: isort==5.13.2; extra == "dev"
+Requires-Dist: flake8==7.1.1; extra == "dev"
+Requires-Dist: black==24.8.0; extra == "dev"
+Requires-Dist: click==8.1.7; extra == "dev"
+Requires-Dist: pytest-xdist==3.6.1; extra == "dev"
+Requires-Dist: pytest-cov==5.0.0; extra == "dev"
+Requires-Dist: pandas>=1.5.1; extra == "dev"
+Provides-Extra: dev-mac
+Requires-Dist: sphinx>=4.1.1; extra == "dev-mac"
+Requires-Dist: sphinx_rtd_theme; extra == "dev-mac"
+Requires-Dist: recommonmark; extra == "dev-mac"
+Requires-Dist: sphinx-copybutton; extra == "dev-mac"
+Requires-Dist: sphinxcontrib-jquery; extra == "dev-mac"
+Requires-Dist: omegaconf; extra == "dev-mac"
+Requires-Dist: torch; extra == "dev-mac"
+Requires-Dist: torchvision; extra == "dev-mac"
+Requires-Dist: scikit-learn; extra == "dev-mac"
+Requires-Dist: pandas>=1.5.1; extra == "dev-mac"
+Requires-Dist: mlflow; extra == "dev-mac"
+Requires-Dist: wandb; extra == "dev-mac"
+Requires-Dist: tensorboard; extra == "dev-mac"
+Requires-Dist: isort==5.13.2; extra == "dev-mac"
+Requires-Dist: flake8==7.1.1; extra == "dev-mac"
+Requires-Dist: black==24.8.0; extra == "dev-mac"
+Requires-Dist: click==8.1.7; extra == "dev-mac"
+Requires-Dist: pytest-xdist==3.6.1; extra == "dev-mac"
+Requires-Dist: pytest-cov==5.0.0; extra == "dev-mac"
+Requires-Dist: pandas>=1.5.1; extra == "dev-mac"
+Dynamic: license-file
+
+<img src="docs/resources/nvidia_eye.wwPt122j.png" alt="NVIDIA Logo" width="200">
+
+# NVIDIA FLARE
+
+[Website](https://nvidia.github.io/NVFlare) | [Paper](https://arxiv.org/abs/2210.13291) | [Blogs](https://developer.nvidia.com/blog/tag/federated-learning) | [Talks & Papers](https://nvflare.readthedocs.io/en/2.6/publications_and_talks.html) | [Research](./research/README.md) | [Documentation](https://nvflare.readthedocs.io/en/2.6)
+
+[![Blossom-CI](https://github.com/NVIDIA/nvflare/workflows/Blossom-CI/badge.svg?branch=2.6)](https://github.com/NVIDIA/nvflare/actions)
+[![documentation](https://readthedocs.org/projects/nvflare/badge/?version=2.6)](https://nvflare.readthedocs.io/en/2.6/?badge=2.6)
+[![license](https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg)](./LICENSE)
+[![pypi](https://badge.fury.io/py/nvflare.svg)](https://badge.fury.io/py/nvflare)
+[![pyversion](https://img.shields.io/pypi/pyversions/nvflare.svg)](https://badge.fury.io/py/nvflare)
+[![downloads](https://static.pepy.tech/badge/nvflare)](https://pepy.tech/project/nvflare)
+
+[NVIDIA FLARE](https://nvidia.github.io/NVFlare/) (**NV**IDIA **F**ederated **L**earning **A**pplication **R**untime **E**nvironment)
+is a domain-agnostic, open-source, extensible Python SDK that allows researchers and data scientists to adapt existing ML/DL workflows to a federated paradigm.
+It enables platform developers to build a secure, privacy-preserving offering for a distributed multi-party collaboration.
+
+## Features
+FLARE is built on a componentized architecture that allows you to take federated learning workloads
+from research and simulation to real-world production deployment.
+
+Application Features
+* Support both deep learning and traditional machine learning algorithms (eg. PyTorch, TensorFlow, Scikit-learn, XGBoost etc.)
+* Support horizontal and vertical federated learning
+* Built-in Federated Learning algorithms (e.g., FedAvg, FedProx, FedOpt, Scaffold, Ditto, etc.)
+* Support multiple server and client-controlled training workflows (e.g., scatter & gather, cyclic) and validation workflows (global model evaluation, cross-site validation)
+* Support both data analytics (federated statistics) and machine learning lifecycle management
+* Privacy preservation with differential privacy, homomorphic encryption, private set intersection (PSI)
+
+From Simulation to Real-World
+* FLARE Client API to transition seamlessly from ML/DL to FL with minimal code changes
+* Simulator and POC mode for rapid development and prototyping
+* Fully customizable and extensible components with modular design
+* Deployment on cloud and on-premise
+* Dashboard for project management and deployment
+* Security enforcement through federated authorization and privacy policy
+* Built-in support for system resiliency and fault tolerance
+
+> _Take a look at [NVIDIA FLARE Overview](https://nvflare.readthedocs.io/en/2.6/flare_overview.html) for a complete overview, and [What's New](https://nvflare.readthedocs.io/en/2.6/whats_new.html) for the lastest changes._
+
+## Installation
+To install the [current release](https://pypi.org/project/nvflare/):
+```
+$ python3 -m pip install nvflare
+```
+
+For detailed installation please refer to [NVIDIA FLARE installation](https://nvflare.readthedocs.io/en/2.6/installation.html).
+
+## Getting Started
+
+* To get started, visit our NVFLARE [website](https://nvidia.github.io/NVFlare/), which includes:
+  * Comprehensive documentation, technical blogs, tutorials, and videos
+  * Slides and recordings of real-world federated learning use cases from past NVFLARE Day Events. 
+  * Tools, API guides, CLI tutorials, training materials, and extensive examples
+* For hands-on learning, try our [step-by-step walkthroughs](https://github.com/NVIDIA/NVFlare/tree/2.6/examples/hello-world/step-by-step) using consistent datasets.
+* Learn how to adapt your centralized training code with our guide on [converting to federated learning](https://github.com/NVIDIA/NVFlare/tree/2.6/examples/hello-world/ml-to-fl).
+
+* Structured, self-paced learning is available through curated tutorials and training paths on the website.
+  * DLI courses:
+    * https://learn.nvidia.com/courses/course-detail?course_id=course-v1:DLI+S-FX-28+V1
+    * https://learn.nvidia.com/courses/course-detail?course_id=course-v1:DLI+S-FX-29+V1
+  * follow the notebooks: https://github.com/NVIDIA/NVFlare/tree/2.6/examples/tutorials/self-paced-training
+ 
+* If you'd like to write your own NVIDIA FLARE components, a detailed programming guide can be found [here](https://nvflare.readthedocs.io/en/2.6/programming_guide.html).
+* visit developer portal https://developer.nvidia.com/flare
+
+## Community
+
+We welcome community contributions! Please refer to the [contributing guidelines](./CONTRIBUTING.md) for more details.
+
+Ask and answer questions, share ideas, and engage with other community members at [NVFlare Discussions](https://github.com/NVIDIA/NVFlare/discussions).
+
+## Related Talks and Publications
+
+Take a look at our growing list of [talks and publications](https://nvflare.readthedocs.io/en/2.6/publications_and_talks.html), and [technical blogs](https://developer.nvidia.com/blog/tag/federated-learning) related to NVIDIA FLARE.
+
+
+## License
+
+NVIDIA FLARE is released under an [Apache 2.0 license](./LICENSE).

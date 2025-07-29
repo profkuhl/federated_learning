@@ -1,0 +1,229 @@
+---
+- name: Build and Distribute Docker Image Across Cluster
+  hosts: localhost
+  connection: local
+  vars:
+    dockerfile_path: "{{ playbook_dir }}/../../build"
+    image_name: "nvflare-cluster"
+    image_tag: "latest"
+    registry_host: "192.168.1.7"
+    registry_port: 5000
+    local_image: "{{ image_name }}:{{ image_tag }}"
+    registry_image: "{{ registry_host }}:{{ registry_port }}/{{ image_name }}:{{ image_tag }}"
+    build_timeout: 3600  # 1 hour timeout
+    max_retries: 3
+    
+  tasks:
+    - name: Check if Dockerfile exists
+      stat:
+        path: "{{ dockerfile_path }}/Dockerfile"
+      register: dockerfile_stat
+      
+    - name: Fail if Dockerfile not found
+      fail:
+        msg: "Dockerfile not found at {{ dockerfile_path }}/Dockerfile"
+      when: not dockerfile_stat.stat.exists
+
+    - name: Create build log directory
+      file:
+        path: "{{ ansible_user_dir }}/docker_build_logs"
+        state: directory
+        mode: '0755'
+
+    - name: Build Docker image with retry logic
+      block:
+        - name: Build Docker image (attempt {{ item }})
+          docker_image:
+            build:
+              path: "{{ dockerfile_path }}"
+              pull: yes
+              nocache: "{{ 'yes' if item > 1 else 'no' }}"
+            name: "{{ local_image }}"
+            tag: "{{ image_tag }}"
+            source: build
+            force_source: yes
+            timeout: "{{ build_timeout }}"
+          register: build_result
+          
+        - name: Log successful build
+          copy:
+            content: |
+              Build completed successfully at {{ ansible_date_time.iso8601 }}
+              Image: {{ local_image }}
+              Build duration: {{ build_result.image.Id }}
+            dest: "{{ ansible_user_dir }}/docker_build_logs/build_success_{{ ansible_date_time.epoch }}.log"
+            
+      rescue:
+        - name: Log build failure
+          copy:
+            content: |
+              Build failed at {{ ansible_date_time.iso8601 }}
+              Attempt: {{ item }}
+              Error: {{ ansible_failed_result.msg | default('Unknown error') }}
+            dest: "{{ ansible_user_dir }}/docker_build_logs/build_failure_{{ ansible_date_time.epoch }}.log"
+            
+        - name: Retry build if not last attempt
+          fail:
+            msg: "Build failed, retrying... ({{ item }}/{{ max_retries }})"
+          when: item < max_retries
+          
+        - name: Final failure after all retries
+          fail:
+            msg: "Build failed after {{ max_retries }} attempts"
+          when: item == max_retries
+          
+      loop: "{{ range(1, max_retries + 1) | list }}"
+
+    - name: Tag image for local registry
+      docker_image:
+        name: "{{ local_image }}"
+        repository: "{{ registry_image }}"
+        source: local
+        
+    - name: Push image to local registry
+      docker_image:
+        name: "{{ registry_image }}"
+        push: yes
+        source: local
+      register: push_result
+      retries: 3
+      delay: 10
+      
+    - name: Verify image in registry
+      uri:
+        url: "http://{{ registry_host }}:{{ registry_port }}/v2/{{ image_name }}/tags/list"
+        method: GET
+        status_code: 200
+      register: registry_verify
+      
+    - name: Display registry verification
+      debug:
+        msg: "Image successfully pushed to registry: {{ registry_verify.json }}"
+
+- name: Distribute Docker Image to All Nodes
+  hosts: nodes
+  become: yes
+  serial: "{{ ansible_play_batch | length }}"  # Process all nodes in parallel
+  vars:
+    image_name: "nvflare-cluster"
+    image_tag: "latest"
+    registry_host: "192.168.1.7"
+    registry_port: 5000
+    registry_image: "{{ registry_host }}:{{ registry_port }}/{{ image_name }}:{{ image_tag }}"
+    local_image: "{{ image_name }}:{{ image_tag }}"
+    pull_timeout: 1800  # 30 minutes
+    max_retries: 3
+    
+  tasks:
+    - name: Create pull log directory
+      file:
+        path: "/tmp/docker_pull_logs"
+        state: directory
+        mode: '0755'
+
+    - name: Test registry connectivity
+      uri:
+        url: "http://{{ registry_host }}:{{ registry_port }}/v2/"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: connectivity_test
+      
+    - name: Pull Docker image with retry logic
+      block:
+        - name: Pull image from local registry (attempt {{ item }})
+          docker_image:
+            name: "{{ registry_image }}"
+            source: pull
+            timeout: "{{ pull_timeout }}"
+          register: pull_result
+          
+        - name: Tag pulled image locally
+          docker_image:
+            name: "{{ registry_image }}"
+            repository: "{{ local_image }}"
+            source: local
+            
+        - name: Log successful pull
+          copy:
+            content: |
+              Pull completed successfully at {{ ansible_date_time.iso8601 }}
+              Node: {{ inventory_hostname }}
+              Image: {{ registry_image }}
+              Local tag: {{ local_image }}
+            dest: "/tmp/docker_pull_logs/pull_success_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.log"
+            
+      rescue:
+        - name: Log pull failure
+          copy:
+            content: |
+              Pull failed at {{ ansible_date_time.iso8601 }}
+              Node: {{ inventory_hostname }}
+              Attempt: {{ item }}
+              Error: {{ ansible_failed_result.msg | default('Unknown error') }}
+            dest: "/tmp/docker_pull_logs/pull_failure_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.log"
+            
+        - name: Clean up partial downloads
+          docker_image:
+            name: "{{ registry_image }}"
+            state: absent
+          ignore_errors: yes
+          
+        - name: Retry pull if not last attempt
+          fail:
+            msg: "Pull failed, retrying... ({{ item }}/{{ max_retries }})"
+          when: item < max_retries
+          
+        - name: Final failure after all retries
+          fail:
+            msg: "Pull failed after {{ max_retries }} attempts on {{ inventory_hostname }}"
+          when: item == max_retries
+          
+      loop: "{{ range(1, max_retries + 1) | list }}"
+
+    - name: Verify image is available locally
+      docker_image_info:
+        name: "{{ local_image }}"
+      register: local_image_info
+      
+    - name: Display image information
+      debug:
+        msg: "Image {{ local_image }} successfully available on {{ inventory_hostname }}"
+        
+    - name: Clean up registry-tagged image to save space
+      docker_image:
+        name: "{{ registry_image }}"
+        state: absent
+      ignore_errors: yes
+
+- name: Generate Distribution Report
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Gather distribution results
+      set_fact:
+        distribution_summary: |
+          Docker Image Distribution Summary
+          =====================================
+          Image: {{ image_name }}:{{ image_tag }}
+          Registry: {{ registry_host }}:{{ registry_port }}
+          
+          Nodes processed: {{ groups['nodes'] | length }}
+          - Server: {{ groups['flare_server'] | join(', ') }}
+          - Clients: {{ groups['flare_clients'] | join(', ') }}
+          
+          Distribution completed at: {{ ansible_date_time.iso8601 }}
+          
+          Next steps:
+          1. Verify images on all nodes: ansible -i inventory.ini nodes -m shell -a "docker images {{ image_name }}"
+          2. Test container startup: ansible -i inventory.ini nodes -m shell -a "docker run --rm {{ image_name }}:{{ image_tag }} python3 --version"
+          3. Check logs: ls -la ~/docker_build_logs/ and /tmp/docker_pull_logs/ on nodes
+          
+    - name: Display distribution summary
+      debug:
+        msg: "{{ distribution_summary }}"
+        
+    - name: Save distribution report
+      copy:
+        content: "{{ distribution_summary }}"
+        dest: "{{ ansible_user_dir }}/docker_distribution_report_{{ ansible_date_time.epoch }}.txt"

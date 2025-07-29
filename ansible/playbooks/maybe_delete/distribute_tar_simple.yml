@@ -1,0 +1,77 @@
+---
+- name: Distribute Docker Image Tar to Cluster Nodes
+  hosts: nodes
+  become: yes
+  serial: 0
+  vars:
+    tar_file: "/home/k3s-server-07/pytorch_image.tar"
+    remote_tar_path: "/tmp/nvflare-cluster.tar"
+    image_name: "nvflare-cluster"
+    image_tag: "latest"
+    
+  tasks:
+    - name: Check if tar file exists on source
+      stat:
+        path: "{{ tar_file }}"
+      register: tar_stat
+      delegate_to: localhost
+      run_once: true
+      
+    - name: Fail if tar file doesn't exist
+      fail:
+        msg: "Tar file {{ tar_file }} not found on localhost"
+      when: not tar_stat.stat.exists
+      run_once: true
+      
+    - name: Copy tar file to remote node using rsync
+      synchronize:
+        src: "{{ tar_file }}"
+        dest: "{{ remote_tar_path }}"
+        mode: push
+        rsync_opts:
+          - "--progress"
+          - "--compress"
+          - "--partial"
+      register: copy_result
+      
+    - name: Set file permissions
+      file:
+        path: "{{ remote_tar_path }}"
+        mode: '0644'
+      
+    - name: Load Docker image from tar file
+      shell: docker load -i {{ remote_tar_path }}
+      register: load_result
+      
+    - name: Verify image was loaded
+      shell: docker images {{ image_name }}:{{ image_tag }} --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}"
+      register: verify_image
+      
+    - name: Clean up tar file
+      file:
+        path: "{{ remote_tar_path }}"
+        state: absent
+      when: '"nvflare-cluster" in verify_image.stdout'
+      
+    - name: Display results
+      debug:
+        msg: |
+          Node: {{ inventory_hostname }}
+          Copy result: {{ 'Success' if copy_job_result.changed else 'Failed' }}
+          Load result: {{ load_result.stdout }}
+          Image verification: {{ verify_image.stdout }}
+
+- name: Summary
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Display completion message
+      debug:
+        msg: |
+          Docker Image Distribution Complete!
+          
+          To verify on all nodes:
+          ansible -i inventory.ini nodes -m shell -a "docker images nvflare-cluster"
+          
+          To test the image:
+          ansible -i inventory.ini nodes -m shell -a "docker run --rm nvflare-cluster:latest python3 --version"

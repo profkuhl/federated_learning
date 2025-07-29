@@ -1,0 +1,102 @@
+---
+- name: Monitor Docker Operations Across Cluster
+  hosts: nodes
+  become: yes
+  gather_facts: no
+  vars:
+    image_name: "nvflare-cluster"
+    image_tag: "latest"
+    
+  tasks:
+    - name: Check Docker service status
+      systemd:
+        name: docker
+      register: docker_service
+      
+    - name: Check Docker disk usage
+      docker_host_info:
+      register: docker_info
+      
+    - name: List Docker images
+      docker_image_info:
+        name: "{{ image_name }}:{{ image_tag }}"
+      register: image_info
+      ignore_errors: yes
+      
+    - name: Check Docker system df
+      shell: docker system df
+      register: docker_df
+      
+    - name: Display node status
+      debug:
+        msg: |
+          Node: {{ inventory_hostname }}
+          Docker Service: {{ docker_service.status.ActiveState }}
+          Docker Root Dir: {{ docker_info.host_info.DockerRootDir }}
+          Image Present: {{ 'Yes' if image_info.images else 'No' }}
+          {% if image_info.images %}
+          Image Size: {{ image_info.images[0].Size | human_readable }}
+          Image Created: {{ image_info.images[0].Created }}
+          {% endif %}
+          
+          Disk Usage:
+          {{ docker_df.stdout }}
+
+- name: Check Build and Pull Logs
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Check for build logs
+      find:
+        paths: "{{ ansible_user_dir }}/docker_build_logs"
+        patterns: "*.log"
+      register: build_logs
+      ignore_errors: yes
+      
+    - name: Display recent build logs
+      debug:
+        msg: "Build logs found: {{ build_logs.files | map(attribute='path') | list }}"
+      when: build_logs.files is defined
+      
+    - name: Check for pull logs on nodes
+      find:
+        paths: "/tmp/docker_pull_logs"
+        patterns: "*.log"
+      register: pull_logs
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['nodes'] }}"
+      ignore_errors: yes
+      
+    - name: Display pull log summary
+      debug:
+        msg: "Pull logs on {{ item.item }}: {{ item.files | length }} files"
+      loop: "{{ pull_logs.results }}"
+      when: item.files is defined
+
+- name: Docker Cleanup Operations
+  hosts: nodes
+  become: yes
+  vars:
+    cleanup_enabled: false  # Set to true to enable cleanup
+    
+  tasks:
+    - name: Remove dangling images
+      docker_prune:
+        images: yes
+        images_filters:
+          dangling: true
+      when: cleanup_enabled
+      
+    - name: Remove unused containers
+      docker_prune:
+        containers: yes
+      when: cleanup_enabled
+      
+    - name: Remove unused volumes
+      docker_prune:
+        volumes: yes
+      when: cleanup_enabled
+      
+    - name: Display cleanup status
+      debug:
+        msg: "Cleanup {{ 'enabled' if cleanup_enabled else 'disabled' }} - set cleanup_enabled=true to run cleanup"

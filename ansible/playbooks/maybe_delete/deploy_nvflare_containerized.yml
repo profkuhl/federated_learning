@@ -1,0 +1,325 @@
+---
+# deploy_nvflare_containerized.yml - Complete NVFlare Containerized Deployment
+# This playbook deploys NVFlare inside PyTorch containers across the cluster
+
+- name: 1. Provision NVFlare Project (Local)
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  vars:
+    build_dir: "{{ playbook_dir }}/../build/nvflare_containerized_project/prod_00"
+    project_file: "{{ playbook_dir }}/../project.yml"
+    # IP to NVFlare name mapping
+    ip_to_name_mapping:
+      "192.168.1.7": "server-07"
+      "192.168.1.9": "client-09"
+      "192.168.1.8": "client-08"
+      "192.168.1.17": "client-17"
+      "192.168.1.18": "client-18"
+      "192.168.1.6": "client-06"
+    
+  tasks:
+    - name: Ensure Python pip is installed
+      become: yes
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+      
+    - name: Install NVFlare wheel using container (bypass system pip restrictions)
+      ansible.builtin.shell: |
+        docker run --rm \
+          -v {{ playbook_dir }}/../:/workspace/project \
+          -w /workspace/project \
+          {{ nvflare_image }} \
+          bash -c "pip install nvflare"
+      register: nvflare_install
+      failed_when: false
+        
+    - name: Create build directory for project output
+      ansible.builtin.file:
+        path: "{{ build_dir }}"
+        state: directory
+        mode: '0755'
+        
+    - name: Check if project already provisioned
+      ansible.builtin.stat:
+        path: "{{ build_dir }}/server-07"
+      register: project_provisioned
+      
+    - name: Provision the NVFlare project using container
+      ansible.builtin.shell: |
+        docker run --rm \
+          -v {{ playbook_dir }}/../:/workspace/project \
+          -w /workspace/project \
+          {{ nvflare_image }} \
+          bash -c "nvflare provision -p project.yml -w build"
+      when: not project_provisioned.stat.exists
+      
+    - name: Display provisioning results
+      ansible.builtin.debug:
+        msg: |
+          NVFlare project provisioned successfully!
+          Build directory: {{ build_dir }}
+          Generated packages for:
+          - Server: server-07 (192.168.1.7)
+          - Clients: client-09, client-08, client-17, client-18, client-06
+          - Admin: admin@nvidia.com
+
+- name: 2. Deploy and Start NVFlare Server (Containerized)
+  hosts: nvflare_server
+  become: yes
+  serial: 1
+  vars:
+    build_dir: "{{ playbook_dir }}/../build/nvflare_containerized_project/prod_00"
+    nvflare_name: "server-07"  # NVFlare participant name for server
+    
+  tasks:
+    - name: Stop existing NVFlare server container
+      ansible.builtin.shell: |
+        docker stop {{ nvflare_container_name }}-server || true
+        docker rm {{ nvflare_container_name }}-server || true
+      failed_when: false
+      
+    - name: Create NVFlare workspace directories on host
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - "{{ nvflare_workspace_dir }}"
+        - "{{ nvflare_workspace_dir }}/server"
+        - "{{ nvflare_workspace_dir }}/admin"
+        - "{{ nvflare_workspace_dir }}/logs"
+        - "{{ nvflare_workspace_dir }}/data"
+        - "{{ nvflare_workspace_dir }}/models"
+        
+    - name: Copy server startup kit to host workspace
+      ansible.builtin.copy:
+        src: "{{ build_dir }}/{{ nvflare_name }}/"
+        dest: "{{ nvflare_workspace_dir }}/server/"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+        
+    - name: Copy admin startup kit to host workspace
+      ansible.builtin.copy:
+        src: "{{ build_dir }}/admin@nvidia.com/"
+        dest: "{{ nvflare_workspace_dir }}/admin/"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+        
+    - name: Create server Docker run script
+      ansible.builtin.copy:
+        dest: "{{ nvflare_workspace_dir }}/run_server.sh"
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        content: |
+          #!/bin/bash
+          # NVFlare Server Container Startup Script
+          
+          docker run -d \
+            --name {{ nvflare_container_name }}-server \
+            --restart unless-stopped \
+            --network host \
+            --ipc=host \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            {% if ansible_architecture == 'x86_64' %}--gpus all{% endif %} \
+            -v {{ nvflare_workspace_dir }}:/workspace/nvflare_workspace \
+            -v {{ nvflare_workspace_dir }}/logs:/workspace/logs \
+            -v {{ nvflare_workspace_dir }}/data:/workspace/data \
+            -v {{ nvflare_workspace_dir }}/models:/workspace/models \
+            -p {{ nvflare_server_port }}:8002 \
+            -p {{ nvflare_admin_port }}:8003 \
+            -w /workspace/nvflare_workspace/server/startup \
+            {{ nvflare_image }} \
+            bash -c "chmod +x sub_start.sh && ./sub_start.sh"
+            
+    - name: Create admin console script
+      ansible.builtin.copy:
+        dest: "{{ nvflare_workspace_dir }}/run_admin.sh"
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        content: |
+          #!/bin/bash
+          # NVFlare Admin Console Startup Script
+          
+          echo "Starting NVFlare Admin Console..."
+          echo "Server: {{ inventory_hostname }}:{{ nvflare_admin_port }}"
+          echo "Commands: check_status server, ls client, submit_job <job>, quit"
+          echo ""
+          
+          docker run -it --rm \
+            --network host \
+            -v {{ nvflare_workspace_dir }}:/workspace/nvflare_workspace \
+            -w /workspace/nvflare_workspace/admin/startup \
+            {{ nvflare_image }} \
+            bash -c "chmod +x fl_admin.sh && ./fl_admin.sh"
+            
+    - name: Start NVFlare server container
+      ansible.builtin.shell: "{{ nvflare_workspace_dir }}/run_server.sh"
+      become_user: "{{ ansible_user }}"
+      
+    - name: Wait for server container to start
+      ansible.builtin.wait_for:
+        port: "{{ nvflare_server_port }}"
+        host: "{{ inventory_hostname }}"
+        timeout: 30
+        
+    - name: Verify server container is running
+      ansible.builtin.shell: "docker ps | grep {{ nvflare_container_name }}-server"
+      register: server_status
+      
+    - name: Display server deployment results
+      ansible.builtin.debug:
+        msg: |
+          ✅ NVFlare Server deployed successfully!
+          Container: {{ nvflare_container_name }}-server
+          Status: {{ server_status.stdout }}
+          Server Port: {{ nvflare_server_port }}
+          Admin Port: {{ nvflare_admin_port }}
+          Workspace: {{ nvflare_workspace_dir }}/server
+
+- name: 3. Deploy and Start NVFlare Clients (Containerized)
+  hosts: nvflare_clients
+  become: yes
+  serial: 2  # Deploy 2 clients at a time
+  vars:
+    build_dir: "{{ playbook_dir }}/../build/nvflare_containerized_project/prod_00"
+    # IP to NVFlare name mapping for clients
+    ip_to_name_mapping:
+      "192.168.1.9": "client-09"
+      "192.168.1.8": "client-08"
+      "192.168.1.17": "client-17"
+      "192.168.1.18": "client-18"
+      "192.168.1.6": "client-06"
+    
+  tasks:
+    - name: Stop existing NVFlare client container
+      ansible.builtin.shell: |
+        docker stop {{ nvflare_container_name }}-client || true
+        docker rm {{ nvflare_container_name }}-client || true
+      failed_when: false
+      
+    - name: Create NVFlare workspace directories on host
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - "{{ nvflare_workspace_dir }}"
+        - "{{ nvflare_workspace_dir }}/client"
+        - "{{ nvflare_workspace_dir }}/logs"
+        - "{{ nvflare_workspace_dir }}/data"
+        - "{{ nvflare_workspace_dir }}/models"
+        
+    - name: Copy client startup kit to host workspace (node-specific)
+      ansible.builtin.copy:
+        src: "{{ build_dir }}/{{ ip_to_name_mapping[inventory_hostname] }}/"
+        dest: "{{ nvflare_workspace_dir }}/client/"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+        
+    - name: Create client Docker run script
+      ansible.builtin.copy:
+        dest: "{{ nvflare_workspace_dir }}/run_client.sh"
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        content: |
+          #!/bin/bash
+          # NVFlare Client Container Startup Script - Node: {{ inventory_hostname }} ({{ ip_to_name_mapping[inventory_hostname] }})
+          
+          docker run -d \
+            --name {{ nvflare_container_name }}-client \
+            --restart unless-stopped \
+            --network host \
+            --ipc=host \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            {% if ansible_architecture == 'x86_64' %}--gpus all{% endif %} \
+            -v {{ nvflare_workspace_dir }}:/workspace/nvflare_workspace \
+            -v {{ nvflare_workspace_dir }}/logs:/workspace/logs \
+            -v {{ nvflare_workspace_dir }}/data:/workspace/data \
+            -v {{ nvflare_workspace_dir }}/models:/workspace/models \
+            -w /workspace/nvflare_workspace/client/startup \
+            {{ nvflare_image }} \
+            bash -c "chmod +x sub_start.sh && ./sub_start.sh"
+            
+    - name: Start NVFlare client container
+      ansible.builtin.shell: "{{ nvflare_workspace_dir }}/run_client.sh"
+      become_user: "{{ ansible_user }}"
+      
+    - name: Wait for client container to start (brief delay)
+      ansible.builtin.wait_for:
+        timeout: 10
+        
+    - name: Verify client container is running
+      ansible.builtin.shell: "docker ps | grep {{ nvflare_container_name }}-client"
+      register: client_status
+      
+    - name: Display client deployment results
+      ansible.builtin.debug:
+        msg: |
+          ✅ NVFlare Client deployed successfully!
+          Node: {{ inventory_hostname }}
+          Container: {{ nvflare_container_name }}-client
+          Status: {{ client_status.stdout }}
+          Workspace: {{ nvflare_workspace_dir }}/client
+
+- name: 4. Deployment Summary and Verification
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    build_dir: "{{ playbook_dir }}/../build/nvflare_containerized_project/prod_00"
+
+  tasks:
+    - name: Verify server container is running
+      ansible.builtin.shell: "ansible -i {{ playbook_dir }}/../inventory.ini nvflare_server -m shell -a 'docker ps | grep nvflare-container-server'"
+      register: server_container_status
+      failed_when: false
+      
+    - name: Verify client containers are running
+      ansible.builtin.shell: "ansible -i {{ playbook_dir }}/../inventory.ini nvflare_clients -m shell -a 'docker ps | grep nvflare-container-client'"
+      register: client_container_status
+      failed_when: false
+      
+    - name: Final deployment summary
+      ansible.builtin.debug:
+        msg: |
+          🎉 NVFlare Containerized Deployment Complete!
+          
+          ✅ Server: 192.168.1.7 (nvflare-container-server)
+          ✅ Clients: 5 nodes deployed (nvflare-container-client)
+          ✅ Admin: Console ready on server node
+          
+          📋 Container Status:
+          Server: {{ 'RUNNING' if server_container_status.rc == 0 else 'CHECK REQUIRED' }}
+          Clients: {{ 'RUNNING' if client_container_status.rc == 0 else 'CHECK REQUIRED' }}
+          
+          🚀 Next Steps:
+          1. Start admin console: ssh 192.168.1.7 "cd /workspace/nvflare_workspace && ./run_admin.sh"
+          2. Check cluster status: check_status server
+          3. Verify clients: ls client
+          4. Submit federated learning jobs
+          
+          📂 Key Directories:
+          - Server workspace: /workspace/nvflare_workspace/server/ (on 192.168.1.7)
+          - Client workspaces: /workspace/nvflare_workspace/client/ (on each client node)
+          - Admin console: /workspace/nvflare_workspace/admin/ (on 192.168.1.7)
+          
+          🔍 Debugging:
+          - Server logs: docker logs nvflare-container-server
+          - Client logs: docker logs nvflare-container-client
+          - Container status: docker ps | grep nvflare-container

@@ -1,0 +1,28 @@
+{
+  "format_version": 2,
+  "servers": [
+    {
+      "name": "nvflare_with_docker_project",
+      "service": {
+        "scheme": "grpc"
+      },
+      "identity": "mylocalhost"
+    }
+  ],
+  "client": {
+    "ssl_private_key": "client.key",
+    "ssl_cert": "client.crt",
+    "ssl_root_cert": "rootCA.pem",
+    "fqsn": "k3s-client-09",
+    "is_leaf": true
+  },
+  "overseer_agent": {
+    "path": "nvflare.ha.dummy_overseer_agent.DummyOverseerAgent",
+    "args": {
+      "role": "client",
+      "overseer_end_point": "",
+      "project": "nvflare_with_docker_project",
+      "name": "k3s-client-09"
+    }
+  }
+}

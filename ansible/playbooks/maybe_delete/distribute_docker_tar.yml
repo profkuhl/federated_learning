@@ -1,0 +1,114 @@
+---
+- name: Export Docker Image as Tar and Distribute to Cluster
+  hosts: localhost
+  connection: local
+  vars:
+    image_name: "nvflare-cluster"
+    image_tag: "latest"
+    local_image: "{{ image_name }}:{{ image_tag }}"
+    tar_file: "/tmp/{{ image_name }}_{{ image_tag }}.tar"
+    
+  tasks:
+    - name: Check if Docker image exists
+      docker_image_info:
+        name: "{{ local_image }}"
+      register: image_info
+      
+    - name: Fail if image doesn't exist
+      fail:
+        msg: "Docker image {{ local_image }} not found. Please build it first."
+      when: image_info.images | length == 0
+      
+    - name: Export Docker image to tar file
+      docker_image:
+        name: "{{ local_image }}"
+        archive_path: "{{ tar_file }}"
+        source: local
+      register: export_result
+      
+    - name: Display tar file info
+      stat:
+        path: "{{ tar_file }}"
+      register: tar_stat
+      
+    - name: Show export results
+      debug:
+        msg: |
+          Image exported successfully:
+          - File: {{ tar_file }}
+          - Size: {{ (tar_stat.stat.size / 1024 / 1024) | round(2) }} MB
+          - Image: {{ local_image }}
+
+- name: Distribute Docker Image Tar to All Nodes
+  hosts: nodes
+  become: yes
+  vars:
+    image_name: "nvflare-cluster"
+    image_tag: "latest"
+    local_image: "{{ image_name }}:{{ image_tag }}"
+    tar_file: "/tmp/{{ image_name }}_{{ image_tag }}.tar"
+    remote_tar_path: "/tmp/{{ image_name }}_{{ image_tag }}.tar"
+    
+  tasks:
+    - name: Copy tar file to remote node
+      copy:
+        src: "{{ tar_file }}"
+        dest: "{{ remote_tar_path }}"
+        mode: '0644'
+      register: copy_result
+      
+    - name: Load Docker image from tar file
+      docker_image:
+        name: "{{ local_image }}"
+        load_path: "{{ remote_tar_path }}"
+        source: load
+        timeout: 1800
+      register: load_result
+      
+    - name: Verify image was loaded
+      docker_image_info:
+        name: "{{ local_image }}"
+      register: verify_image
+      
+    - name: Clean up tar file
+      file:
+        path: "{{ remote_tar_path }}"
+        state: absent
+      when: verify_image.images | length > 0
+      
+    - name: Display load results
+      debug:
+        msg: |
+          Node: {{ inventory_hostname }}
+          Image loaded: {{ 'Yes' if verify_image.images | length > 0 else 'No' }}
+          {% if verify_image.images | length > 0 %}
+          Image ID: {{ verify_image.images[0].Id }}
+          Size: {{ (verify_image.images[0].Size / 1024 / 1024) | round(2) }} MB
+          {% endif %}
+
+- name: Clean up and Summary
+  hosts: localhost
+  connection: local
+  vars:
+    image_name: "nvflare-cluster"
+    image_tag: "latest"
+    tar_file: "/tmp/{{ image_name }}_{{ image_tag }}.tar"
+    
+  tasks:
+    - name: Remove local tar file
+      file:
+        path: "{{ tar_file }}"
+        state: absent
+        
+    - name: Display distribution summary
+      debug:
+        msg: |
+          Docker Image Distribution Complete!
+          ====================================
+          Image: {{ image_name }}:{{ image_tag }}
+          
+          To verify on all nodes:
+          ansible -i inventory.ini nodes -m shell -a "docker images {{ image_name }}"
+          
+          To test the image:
+          ansible -i inventory.ini nodes -m shell -a "docker run --rm {{ image_name }}:{{ image_tag }} python3 --version"
