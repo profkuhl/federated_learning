@@ -1,0 +1,6 @@
+**/workspace/*
+**/.venv/*
+.env
+logs.txt
+.db_init_done
+db.sqlite

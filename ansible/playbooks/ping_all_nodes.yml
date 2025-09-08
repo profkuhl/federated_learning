@@ -1,62 +1,8 @@
 ---
-- name: Ping and Verify Connectivity to All Nodes
-  hosts: nodes
-  gather_facts: yes
-  
+- name: Check connectivity for all hosts
+  hosts: all
+  gather_facts: no
+
   tasks:
-    - name: Ping all nodes using Ansible ping module
+    - name: Ping all hosts
       ansible.builtin.ping:
-      register: ping_result
-      
-    - name: Display ping results
-      ansible.builtin.debug:
-        msg: |
-          ✅ Node {{ inventory_hostname }} is REACHABLE
-          Connection: {{ ansible_connection | default('ssh') }}
-          User: {{ ansible_user }}
-          Python version: {{ ansible_python_version }}
-          
-    - name: Test network connectivity with system ping
-      ansible.builtin.shell: ping -c 3 {{ inventory_hostname }}
-      register: network_ping
-      changed_when: false
-      failed_when: false
-      delegate_to: localhost
-      
-    - name: Display network ping results
-      ansible.builtin.debug:
-        msg: |
-          Network ping to {{ inventory_hostname }}:
-          {% if network_ping.rc == 0 %}
-          ✅ SUCCESS - Network connectivity confirmed
-          {% else %}
-          ❌ FAILED - Network connectivity issue
-          {% endif %}
-          Output: {{ network_ping.stdout }}
-          
-    - name: Check system uptime
-      ansible.builtin.shell: uptime
-      register: system_uptime
-      changed_when: false
-      
-    - name: Display system information
-      ansible.builtin.debug:
-        msg: |
-          System Info for {{ inventory_hostname }}:
-          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
-          Kernel: {{ ansible_kernel }}
-          Architecture: {{ ansible_architecture }}
-          Uptime: {{ system_uptime.stdout }}
-          
-  post_tasks:
-    - name: Summary of connectivity test
-      ansible.builtin.debug:
-        msg: |
-          =============================================
-          Connectivity Test Summary for {{ inventory_hostname }}
-          =============================================
-          Ansible Ping: {{ '✅ SUCCESS' if ping_result.ping is defined and ping_result.ping == 'pong' else '❌ FAILED' }}
-          Network Ping: {{ '✅ SUCCESS' if network_ping.rc == 0 else '❌ FAILED' }}
-          Node Status: {{ '🟢 ONLINE' if ping_result.ping is defined and ping_result.ping == 'pong' else '🔴 OFFLINE' }}
-          =============================================
-      run_once: false

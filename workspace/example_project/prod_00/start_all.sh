@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
-./server1/startup/start.sh
-./site-1/startup/start.sh
-./site-2/startup/start.sh
+./172.19.1.7/startup/start.sh
+./k3s-client-09/startup/start.sh
+./k3s-client-08/startup/start.sh
+./k3s-client-17/startup/start.sh
+./k3s-client-18/startup/start.sh
+./k3s-client-06/startup/start.sh
