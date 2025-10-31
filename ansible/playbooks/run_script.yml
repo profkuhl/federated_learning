@@ -1,0 +1,30 @@
+---
+- name: Run a shell script in a specific directory
+  hosts: all
+  become: no
+
+  vars_prompt:
+    - name: "script_path"
+      prompt: "Enter the full path to the script on the remote machine"
+      private: no
+
+    - name: "work_dir"
+      prompt: "Enter the directory where the script should run"
+      private: no
+
+  tasks:
+    - name: Ensure the script is executable
+      ansible.builtin.file:
+        path: "{{ script_path }}"
+        mode: "u+x"
+
+    - name: Execute the shell script in the specified directory
+      ansible.builtin.command:
+        cmd: "{{ script_path }}"
+        chdir: "{{ work_dir }}"
+      register: script_output
+
+    - name: Display the script's output
+      ansible.builtin.debug:
+        msg: "{{ script_output.stdout_lines }}"
+

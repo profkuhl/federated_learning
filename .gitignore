@@ -4,3 +4,6 @@
 logs.txt
 .db_init_done
 db.sqlite
+*.parquet
+*.csv
+.ipynb_checkpoints/
