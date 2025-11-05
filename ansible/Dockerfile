@@ -1,21 +1,16 @@
-# Use an official PyTorch base image from Docker Hub, which includes CUDA and cuDNN.
-# This replaces the nvcr.io image. We choose a recent, stable version.
-# ARG BASE_IMAGE=pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3
+# Use the latest NVIDIA PyTorch container (includes CUDA, cuDNN, PyTorch optimized for NVIDIA GPUs)
+# Format: YY.MM-py3 (e.g., 25.10 = October 2025)
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.10-py3
 FROM ${BASE_IMAGE}
 
-# The rest of the Dockerfile remains the same.
-ARG NVF_BRANCH=main
+# Update pip and install NVFlare 2.7.0 (latest stable release)
+RUN python3 -m pip install -U pip setuptools wheel && \
+    python3 -m pip install nvflare==2.7.0 && \
+    python3 -m pip install torch torchvision numpy pandas polars
 
-#RUN apt-get update && \
-#    apt-get install -y git && \
-#    rm -rf /var/lib/apt/lists/*
-
-# Update pip and install NVFlare. The base image already has python3 and pip.
-RUN python3 -m pip install -U pip setuptools
-RUN python3 -m pip install nvflare~=2.6.1rc
-
-# Set the working directory and clone the NVFlare examples.
+# Set working directory
 WORKDIR /workspace/
-RUN git clone https://github.com/NVIDIA/NVFlare.git --branch ${NVF_BRANCH} --single-branch NVFlare
+
+# Verify CUDA is available (optional - shows CUDA version in build logs)
+RUN python3 -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}'); print(f'CUDA Version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}')"
 

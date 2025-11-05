@@ -6,7 +6,7 @@ participants:
   # Change the name of the server (server1) to the Fully Qualified Domain Name
   # (FQDN) of the server, for example: server1.example.com.
   # Ensure that the FQDN is correctly mapped in the /etc/hosts file.
-  - name: 172.19.1.7 
+  - name: server
     type: server
     org: nvidia
     fed_learn_port: 8002
@@ -18,15 +18,15 @@ participants:
   - name: k3s-client-08
     type: client
     org: nvidia
-  - name: k3s-client-17
-    type: client
-    org: nvidia
-  - name: k3s-client-18
-    type: client
-    org: nvidia
-  - name: k3s-client-06
-    type: client
-    org: nvidia
+  # - name: k3s-client-17
+  #   type: client
+  #   org: nvidia
+  # - name: k3s-client-18
+  #   type: client
+  #   org: nvidia
+  # - name: k3s-client-06
+  #   type: client
+  #   org: nvidia
   - name: admin@nvidia.com
     type: admin
     org: nvidia
@@ -53,7 +53,7 @@ builders:
       # app_validator: PATH_TO_YOUR_OWN_APP_VALIDATOR
 
       # when docker_image is set to a docker image name, docker.sh will be generated on server/client/admin
-      # docker_image: nvflare-pt-docker
+      docker_image: nvflare-pt-docker
 
       # download_job_url is set to http://download.server.com/ as default in fed_server.json.  You can override this
       # to different url.
@@ -68,7 +68,7 @@ builders:
         # 
         overseer_exists: false
         args:
-          sp_end_point: 172.19.1.7:8002:8003
+          sp_end_point: server:8002:8003
 
 #      docker_image: localhost/nvflare:0.0.1
 #

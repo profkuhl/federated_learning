@@ -1,4 +1,3 @@
-**/workspace/*
 **/.venv/*
 .env
 logs.txt

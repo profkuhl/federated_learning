@@ -1,0 +1,16 @@
+{
+    "name": "pt_mnist_fedavg",
+    "resource_spec": {},
+    "min_clients": 1,
+    "deploy_map": {
+        "app_server": [
+            "server"
+        ],
+        "app_k3s-client-08": [
+            "k3s-client-08"
+        ],
+        "app_k3s-client-09": [
+            "k3s-client-09"
+        ]
+    }
+}
