@@ -299,4 +299,14 @@ Training scripts should use: `DATASET_PATH = os.environ.get("NVFLARE_DATA_PATH",
 3. **Data mount missing**: Containers didn't have data directory mounted - added `~/nvflare_data:/data:ro`
 4. **Missing TensorDataset import**: Training script was missing import - fixed
 5. **Local client not deployed**: Added local client deployment to Ansible playbook
+6. **CUDA driver compatibility**: Base image `nvcr.io/nvidia/pytorch:25.10-py3` required driver 580.95+, but nodes have 570.195.03. Changed to `24.12-py3` which supports driver 570.x
+
+## Docker Image Compatibility
+
+| Driver Version | Compatible PyTorch Image | CUDA Version |
+|----------------|-------------------------|--------------|
+| 570.x | `nvcr.io/nvidia/pytorch:24.12-py3` | 12.8 |
+| 580.x+ | `nvcr.io/nvidia/pytorch:25.10-py3` | 12.x |
+
+**Current Configuration**: All nodes use driver 570.195.03 with `pytorch:24.12-py3`
 
