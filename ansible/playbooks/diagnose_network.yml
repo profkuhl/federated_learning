@@ -1,0 +1,94 @@
+---
+# Diagnostic playbook to check current Docker and network configuration
+# Run with: ansible-playbook -i ansible/inventory.ini ansible/playbooks/diagnose_network.yml
+
+- name: Diagnose Network Configuration
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Get hostname and IP info
+      ansible.builtin.debug:
+        msg: "Host: {{ inventory_hostname }} | IP: {{ ansible_host | default(ansible_default_ipv4.address) }}"
+
+    - name: Check if Docker is installed
+      ansible.builtin.command: docker --version
+      register: docker_version
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display Docker version
+      ansible.builtin.debug:
+        msg: "{{ docker_version.stdout | default('Docker not installed') }}"
+
+    - name: List running Docker containers
+      ansible.builtin.command: docker ps --format "table {{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}\t{{ '{{' }}.Ports{{ '}}' }}\t{{ '{{' }}.Networks{{ '}}' }}"
+      register: docker_ps
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display running containers
+      ansible.builtin.debug:
+        msg: "{{ docker_ps.stdout_lines | default(['No containers running']) }}"
+
+    - name: Check Docker network mode of nvflare containers
+      ansible.builtin.shell: |
+        docker inspect --format '{{ '{{' }}json .HostConfig.NetworkMode{{ '}}' }}' $(docker ps -q --filter "name=nvflare") 2>/dev/null || echo "No nvflare containers"
+      register: docker_network_mode
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display Docker network mode
+      ansible.builtin.debug:
+        msg: "NVFlare container network mode: {{ docker_network_mode.stdout }}"
+
+    - name: Check UFW status
+      become: yes
+      ansible.builtin.command: ufw status verbose
+      register: ufw_status
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display UFW status
+      ansible.builtin.debug:
+        msg: "{{ ufw_status.stdout_lines | default(['UFW not available']) }}"
+
+    - name: Check if NVFlare ports are listening (8002, 8003)
+      ansible.builtin.shell: ss -tlnp | grep -E ':(8002|8003)' || echo "Ports 8002/8003 not listening"
+      register: listening_ports
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display listening ports
+      ansible.builtin.debug:
+        msg: "{{ listening_ports.stdout_lines }}"
+
+    - name: Test connectivity to server from clients (port 8002)
+      ansible.builtin.shell: |
+        timeout 2 bash -c "echo >/dev/tcp/{{ nvflare_server_ip }}/8002" 2>&1 && echo "SUCCESS: Can reach server:8002" || echo "FAILED: Cannot reach server:8002"
+      register: server_connectivity
+      ignore_errors: yes
+      changed_when: false
+      when: "'nvflare_clients' in group_names"
+
+    - name: Display server connectivity result
+      ansible.builtin.debug:
+        msg: "{{ server_connectivity.stdout | default('N/A - this is the server') }}"
+      when: "'nvflare_clients' in group_names"
+
+- name: Test server to client connectivity
+  hosts: nvflare_server
+  tasks:
+    - name: Test connectivity from server to each client (port 8002)
+      ansible.builtin.shell: |
+        timeout 2 bash -c "echo >/dev/tcp/{{ hostvars[item].ansible_host }}/8002" 2>&1 && echo "SUCCESS: Can reach {{ item }}:8002" || echo "FAILED: Cannot reach {{ item }}:8002"
+      register: client_connectivity
+      ignore_errors: yes
+      changed_when: false
+      loop: "{{ groups['nvflare_clients'] }}"
+
+    - name: Display client connectivity results
+      ansible.builtin.debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ client_connectivity.results }}"
+      loop_control:
+        label: "{{ item.item }}"

@@ -18,13 +18,14 @@ import torch
 from mnist_cnn import MnistCnn
 from torch import nn
 from torch.optim import SGD
-from torch.utils.data.dataloader import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 
 import nvflare.client as flare
 from nvflare.client.tracking import SummaryWriter
 
-DATASET_PATH = "/tmp/mnist_data/"
+# Standard data path - mounted from ~/nvflare_data on host to /data in container
+DATASET_PATH = os.environ.get("NVFLARE_DATA_PATH", "/data/mnist")
 
 
 def main():

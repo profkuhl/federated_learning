@@ -1,0 +1,69 @@
+---
+# Configure /etc/hosts on all nodes for consistent NVFlare hostname resolution
+# These changes persist across reboots (modifies /etc/hosts directly)
+# Run with: ansible-playbook -i ansible/inventory.ini ansible/playbooks/configure_hosts_file.yml
+
+- name: Configure /etc/hosts for NVFlare
+  hosts: all
+  become: yes
+  tasks:
+    - name: Ensure server hostname resolves to correct IP
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '.*\s+server(\s|$)'
+        line: "{{ nvflare_server_ip }}    server"
+        state: present
+        backup: yes
+
+    - name: Ensure mylocalhost resolves to server IP (used by NVFlare)
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '.*\s+mylocalhost(\s|$)'
+        line: "{{ nvflare_server_ip }}    mylocalhost"
+        state: present
+
+    - name: Add all client hostnames to /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '.*\s+{{ item }}(\s|$)'
+        line: "{{ hostvars[item].ansible_host }}    {{ item }}"
+        state: present
+      loop: "{{ groups['nvflare_clients'] }}"
+
+    - name: Add server node hostname to /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '.*\s+{{ groups["nvflare_server"][0] }}(\s|$)'
+        line: "{{ nvflare_server_ip }}    {{ groups['nvflare_server'][0] }}"
+        state: present
+
+    - name: Display current /etc/hosts entries for NVFlare
+      ansible.builtin.shell: grep -E '(server|mylocalhost|k3s-)' /etc/hosts || echo "No NVFlare entries found"
+      register: hosts_entries
+      changed_when: false
+
+    - name: Show configured host entries
+      ansible.builtin.debug:
+        msg: "{{ hosts_entries.stdout_lines }}"
+
+- name: Verify hostname resolution
+  hosts: all
+  tasks:
+    - name: Test resolution of 'server' hostname
+      ansible.builtin.command: getent hosts server
+      register: server_resolution
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Test resolution of 'mylocalhost' hostname
+      ansible.builtin.command: getent hosts mylocalhost
+      register: mylocalhost_resolution
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display resolution results
+      ansible.builtin.debug:
+        msg: |
+          Hostname resolution on {{ inventory_hostname }}:
+          - server: {{ server_resolution.stdout | default('FAILED') }}
+          - mylocalhost: {{ mylocalhost_resolution.stdout | default('FAILED') }}

@@ -1,0 +1,240 @@
+---
+- name: 0. Configure Docker User and Service
+  hosts: all
+  become: yes
+  tasks:
+    - name: Ensure remote user is in the 'docker' group for permissions
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Ensure Docker service is started and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create standard data directory for NVFlare datasets
+      ansible.builtin.file:
+        path: "{{ nvflare_data_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+- name: 1. Provision Project and Deploy Server
+  hosts: nvflare_server
+  vars:
+    provision_venv_path: "/opt/nvflare_provision_venv"
+    build_context_path: "/tmp/nvflare_build_context"
+    workspace_path: "{{ playbook_dir }}/../../workspace"
+  tasks:
+    - name: Ensure Python venv package is installed
+      become: yes
+      ansible.builtin.apt:
+        name: python3-venv
+        state: present
+
+    - name: Create a virtual environment for provisioning
+      become: yes
+      ansible.builtin.command:
+        cmd: "python3 -m venv {{ provision_venv_path }}"
+        creates: "{{ provision_venv_path }}/bin/pip"
+
+    - name: Ensure correct ownership of the venv directory
+      become: yes
+      ansible.builtin.file:
+        path: "{{ provision_venv_path }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: yes
+
+    - name: Install NVFlare wheel into the virtual environment
+      ansible.builtin.pip:
+        name: nvflare==2.7.1
+        virtualenv: "{{ provision_venv_path }}"
+
+    - name: Create a clean directory for the Docker build context
+      ansible.builtin.file:
+        path: "{{ build_context_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy the Dockerfile to the clean build context
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../Dockerfile"
+        dest: "{{ build_context_path }}/Dockerfile"
+
+    - name: Build the custom NVFlare Docker image locally
+      community.docker.docker_image:
+        name: nvflare-pt-docker
+        tag: latest
+        build:
+          path: "{{ build_context_path }}"
+        source: build
+        force_source: yes
+      
+    - name: Remove old workspace if exists (for clean re-provisioning)
+      ansible.builtin.file:
+        path: "{{ workspace_path }}"
+        state: absent
+
+    - name: Provision the NVFlare project
+      ansible.builtin.command:
+        cmd: "{{ provision_venv_path }}/bin/nvflare provision -p project.yml -w {{ workspace_path }}"
+        chdir: "{{ playbook_dir }}/../.."
+
+    - name: Create server workspace directory
+      ansible.builtin.file:
+        path: "{{ nvflare_workspace_dir }}/server"
+        state: directory
+        mode: '0755'
+
+    - name: Copy server startup kit
+      ansible.builtin.copy:
+        src: "{{ workspace_path }}/example_project/prod_00/server/"
+        dest: "{{ nvflare_workspace_dir }}/server/"
+        remote_src: yes
+
+    - name: Stop and remove existing server container if running
+      community.docker.docker_container:
+        name: nvflare-server
+        state: absent
+      ignore_errors: yes
+
+    - name: Start server container with host networking (persistent across reboots)
+      community.docker.docker_container:
+        name: nvflare-server
+        image: nvflare-pt-docker
+        state: started
+        restart_policy: unless-stopped
+        network_mode: host
+        ipc_mode: host
+        device_requests:
+          - driver: nvidia
+            count: -1  # all GPUs
+            capabilities:
+              - ["gpu"]
+        working_dir: /workspace
+        volumes:
+          - "{{ nvflare_workspace_dir }}/server:/workspace:rw"
+          - "{{ nvflare_data_dir }}:/data:ro"
+        command: >
+          /bin/bash -c "python -u -m nvflare.private.fed.app.server.server_train
+          -m /workspace -s fed_server.json
+          --set secure_train=true config_folder=config org=nvidia"
+
+    # Deploy local client on the server node (k3s-server-07-client)
+    - name: Create local client workspace directory
+      ansible.builtin.file:
+        path: "{{ nvflare_workspace_dir }}/k3s-server-07-client"
+        state: directory
+        mode: '0755'
+
+    - name: Copy local client startup kit
+      ansible.builtin.copy:
+        src: "{{ workspace_path }}/example_project/prod_00/k3s-server-07-client/"
+        dest: "{{ nvflare_workspace_dir }}/k3s-server-07-client/"
+        remote_src: yes
+
+    - name: Stop and remove existing local client container if running
+      community.docker.docker_container:
+        name: nvflare-client-local
+        state: absent
+      ignore_errors: yes
+
+    - name: Start local client container with host networking
+      community.docker.docker_container:
+        name: nvflare-client-local
+        image: nvflare-pt-docker
+        state: started
+        restart_policy: unless-stopped
+        network_mode: host
+        ipc_mode: host
+        device_requests:
+          - driver: nvidia
+            count: -1  # all GPUs
+            capabilities:
+              - ["gpu"]
+        working_dir: /workspace
+        volumes:
+          - "{{ nvflare_workspace_dir }}/k3s-server-07-client:/workspace:rw"
+          - "{{ nvflare_data_dir }}:/data:ro"
+        command: >
+          /bin/bash -c "python -u -m nvflare.private.fed.app.client.client_train
+          -m /workspace -s fed_client.json
+          --set uid=k3s-server-07-client secure_train=true config_folder=config org=nvidia"
+
+- name: 2. Build Image and Deploy Clients
+  hosts: nvflare_clients
+  vars:
+    build_context_path: "/tmp/nvflare_build_context"
+    workspace_path: "{{ playbook_dir }}/../../workspace/"
+  tasks:
+    - name: Create a clean directory for the Docker build context
+      ansible.builtin.file:
+        path: "{{ build_context_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy the Dockerfile to the clean build context
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../Dockerfile"
+        dest: "{{ build_context_path }}/Dockerfile"
+
+    - name: Build the custom NVFlare Docker image locally on the client
+      community.docker.docker_image:
+        name: nvflare-pt-docker
+        tag: latest
+        build:
+          path: "{{ build_context_path }}"
+        source: build
+        force_source: yes
+
+    - name: Create client workspace directory
+      ansible.builtin.file:
+        path: "{{ nvflare_workspace_dir }}/{{ inventory_hostname }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy client startup kit from server to client
+      ansible.posix.synchronize:
+        src: "{{ workspace_path }}/example_project/prod_00/{{ inventory_hostname }}/"
+        dest: "{{ nvflare_workspace_dir }}/{{ inventory_hostname }}/"
+        mode: push
+      delegate_to: "{{ groups['nvflare_server'][0] }}"
+    
+    - name: Stop and remove existing client container if running
+      community.docker.docker_container:
+        name: "nvflare-client-{{ inventory_hostname | regex_replace('^k3s-client-', '') }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Start client container with host networking (persistent across reboots)
+      community.docker.docker_container:
+        name: "nvflare-client-{{ inventory_hostname | regex_replace('^k3s-client-', '') }}"
+        image: nvflare-pt-docker
+        state: started
+        restart_policy: unless-stopped
+        network_mode: host
+        ipc_mode: host
+        device_requests:
+          - driver: nvidia
+            count: -1  # all GPUs
+            capabilities:
+              - ["gpu"]
+        working_dir: /workspace
+        etc_hosts:
+          server: "{{ nvflare_server_ip }}"
+          mylocalhost: "{{ nvflare_server_ip }}"
+        volumes:
+          - "{{ nvflare_workspace_dir }}/{{ inventory_hostname }}:/workspace:rw"
+          - "{{ nvflare_data_dir }}:/data:ro"
+          - "/etc/passwd:/etc/passwd:ro"
+          - "/etc/group:/etc/group:ro"
+        command: >
+          /bin/bash -c "python -u -m nvflare.private.fed.app.client.client_train
+          -m /workspace -s fed_client.json
+          --set uid={{ inventory_hostname }} secure_train=true config_folder=config org=nvidia"

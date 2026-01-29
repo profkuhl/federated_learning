@@ -1,13 +1,48 @@
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-import json  # Added this import
+import json
 
 import numpy as np
 import torch
+import yaml
 from torch.utils.data import Subset
+
+def get_clients_from_project_yml(project_yml_path: str) -> list:
+    """
+    Reads client names from a NVFlare project.yml file.
+    Returns list of client participant names.
+    """
+    with open(project_yml_path, 'r') as f:
+        project = yaml.safe_load(f)
+
+    clients = []
+    for participant in project.get('participants', []):
+        if participant.get('type') == 'client':
+            clients.append(participant['name'])
+    return clients
+
+
+def is_local_client(client_name: str, inventory_path: str) -> bool:
+    """
+    Determines if a client is local (on this machine) or remote.
+    Returns True if client is not in nvflare_clients group (assumed local).
+    """
+    try:
+        cmd = ["ansible-inventory", "-i", inventory_path, "--list"]
+        result = subprocess.run(cmd, check=True, text=True, capture_output=True, timeout=10)
+        inventory_data = json.loads(result.stdout)
+
+        remote_clients = inventory_data.get("nvflare_clients", {}).get("hosts", [])
+        return client_name not in remote_clients
+    except Exception:
+        # If we can't determine, assume it's local to be safe
+        return True
+
 
 def split_dataset_indices(num_samples: int, num_sites: int, split_method: str):
     """
@@ -69,11 +104,12 @@ def split_and_distribute(
     inventory_path: str,
     split_method: str,
     remote_dest_path: str,
+    project_yml_path: str = None,
 ):
     """
-    Splits, saves, and distributes any dataset (provided as tensors or arrays) 
-    to Ansible clients.
-    
+    Splits, saves, and distributes any dataset (provided as tensors or arrays)
+    to NVFlare clients.
+
     *** This will DELETE and REPLACE the remote_dest_path on all clients. ***
 
     Args:
@@ -84,6 +120,8 @@ def split_and_distribute(
         inventory_path: Path to the inventory.ini file.
         split_method: 'uniform', 'exponential', 'square', or 'linear'.
         remote_dest_path: Absolute path on clients (e.g., "/tmp/my_data").
+        project_yml_path: Optional path to project.yml. If provided, reads clients
+                          from project.yml (includes local clients not in Ansible inventory).
     """
     print("--- Starting Data Split and Distribution ---")
 
@@ -104,40 +142,46 @@ def split_and_distribute(
     if isinstance(test_labels, np.ndarray):
         test_labels = torch.from_numpy(test_labels)
 
-    # --- 2. Get Client Info from Ansible (THE CORRECT WAY) ---
+    # --- 2. Get Client Info ---
     if not Path(inventory_path).exists():
         print(f"Error: Inventory file not found at {inventory_path}", file=sys.stderr)
         return
 
-    print(f"Querying Ansible inventory '{inventory_path}' for client list...")
-    cmd_inventory = [
-        "ansible-inventory", "-i", inventory_path, "--list"
-    ]
-    try:
-        result = subprocess.run(cmd_inventory, check=True, text=True, capture_output=True, timeout=10)
-        inventory_data = json.loads(result.stdout)
-        
-        if "nvflare_clients" not in inventory_data or "hosts" not in inventory_data["nvflare_clients"]:
-            print(f"Error: [nvflare_clients] group or its hosts not found in '{inventory_path}' output.", file=sys.stderr)
-            return
-            
-        # This is the robust way to get the hostnames as Ansible sees them
-        client_names = inventory_data["nvflare_clients"]["hosts"]
-        num_sites = len(client_names)
-        if num_sites == 0:
-            print(f"Error: No hosts found in [nvflare_clients] group.", file=sys.stderr)
-            return
-            
-        print(f"Found {num_sites} clients: {client_names}")
+    # If project.yml is provided, use it to get ALL clients (including local)
+    if project_yml_path and Path(project_yml_path).exists():
+        print(f"Reading clients from project.yml: {project_yml_path}")
+        client_names = get_clients_from_project_yml(project_yml_path)
+        print(f"Found {len(client_names)} clients from project.yml: {client_names}")
+    else:
+        # Fall back to Ansible inventory only
+        print(f"Querying Ansible inventory '{inventory_path}' for client list...")
+        cmd_inventory = [
+            "ansible-inventory", "-i", inventory_path, "--list"
+        ]
+        try:
+            result = subprocess.run(cmd_inventory, check=True, text=True, capture_output=True, timeout=10)
+            inventory_data = json.loads(result.stdout)
 
-    except subprocess.CalledProcessError as e:
-        print(f"\n❌ Error querying Ansible inventory:", file=sys.stderr)
-        print(e.stderr, file=sys.stderr)
+            if "nvflare_clients" not in inventory_data or "hosts" not in inventory_data["nvflare_clients"]:
+                print(f"Error: [nvflare_clients] group or its hosts not found in '{inventory_path}' output.", file=sys.stderr)
+                return
+
+            client_names = inventory_data["nvflare_clients"]["hosts"]
+        except subprocess.CalledProcessError as e:
+            print(f"\n❌ Error querying Ansible inventory:", file=sys.stderr)
+            print(e.stderr, file=sys.stderr)
+            return
+        except json.JSONDecodeError as e:
+            print(f"\n❌ Error parsing Ansible inventory output:", file=sys.stderr)
+            print(e, file=sys.stderr)
+            return
+
+    num_sites = len(client_names)
+    if num_sites == 0:
+        print(f"Error: No clients found.", file=sys.stderr)
         return
-    except json.JSONDecodeError as e:
-        print(f"\n❌ Error parsing Ansible inventory output:", file=sys.stderr)
-        print(e, file=sys.stderr)
-        return
+
+    print(f"Distributing to {num_sites} clients: {client_names}")
 
     # --- 3. Create Local Splits in a Temp Directory ---
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -159,71 +203,101 @@ def split_and_distribute(
         print(f"\nSaving full test dataset...")
         _save_tensors_to_pt(test_data, test_labels, Path(temp_dir) / "test_data.pt")
 
-        # --- 4. Distribute Files with Ansible (Targeted) ---
-        print("\nStarting distribution to clients via Ansible...")
-        
-        # Command to DELETE the existing directory
-        cmd_delete_dir = [
-            "ansible", "-i", inventory_path, "nvflare_clients",
-            "-m", "file",
-            "-a", f"path={remote_dest_path} state=absent"
-        ]
-        
-        # Command to RE-CREATE the directory
-        cmd_create_dir = [
-            "ansible", "-i", inventory_path, "nvflare_clients",
-            "-m", "file",
-            "-a", f"path={remote_dest_path} state=directory mode=0755"
-        ]
+        # --- 4. Distribute Files ---
+        print("\nStarting distribution to clients...")
 
-        try:
-            print(f"  WARNING: Deleting remote directory '{remote_dest_path}' on all clients...")
-            subprocess.run(cmd_delete_dir, check=True, text=True, capture_output=True, timeout=60)
-            
-            print(f"  Re-creating remote directory '{remote_dest_path}'...")
-            subprocess.run(cmd_create_dir, check=True, text=True, capture_output=True, timeout=60)
-            
-        except Exception as e:
-            print(f"\n❌ Error re-creating remote directories:", file=sys.stderr)
-            print(e.stderr if hasattr(e, 'stderr') else e, file=sys.stderr)
-            return
+        # Separate local and remote clients
+        local_clients = [c for c in client_names if is_local_client(c, inventory_path)]
+        remote_clients = [c for c in client_names if not is_local_client(c, inventory_path)]
 
-        # Loop and send files one by one
-        print("  Distributing client-specific files...")
-        for client_name in client_names:
-            print(f"    Sending files to {client_name}...")
-            
-            # --- Send client's train file ---
-            train_file_name = f"{client_name}_train.pt"
-            src_train_path = Path(temp_dir) / train_file_name
-            dest_train_path = Path(remote_dest_path) / train_file_name
-            
-            cmd_copy_train = [
-                "ansible", "-i", inventory_path, client_name, # Target ONE client
-                "-m", "copy",
-                "-a", f"src={src_train_path} dest={dest_train_path} mode=0644"
-            ]
-            
-            # --- Send shared test file ---
+        print(f"  Local clients (on this machine): {local_clients}")
+        print(f"  Remote clients (via Ansible): {remote_clients}")
+
+        # --- 4a. Handle LOCAL clients ---
+        if local_clients:
+            print(f"\n  Distributing to local clients...")
+            local_dest = Path(remote_dest_path)
+
+            # Recreate local directory
+            if local_dest.exists():
+                shutil.rmtree(local_dest)
+            local_dest.mkdir(parents=True, exist_ok=True)
+
+            # Copy test data (shared)
             src_test_path = Path(temp_dir) / "test_data.pt"
-            dest_test_path = Path(remote_dest_path) / "test_data.pt"
-            
-            cmd_copy_test = [
-                "ansible", "-i", inventory_path, client_name, # Target ONE client
-                "-m", "copy",
-                "-a", f"src={src_test_path} dest={dest_test_path} mode=0644"
+            shutil.copy2(src_test_path, local_dest / "test_data.pt")
+            print(f"    Copied test_data.pt to {local_dest}")
+
+            # Copy each local client's training data
+            for client_name in local_clients:
+                train_file_name = f"{client_name}_train.pt"
+                src_train_path = Path(temp_dir) / train_file_name
+                shutil.copy2(src_train_path, local_dest / train_file_name)
+                print(f"    Copied {train_file_name} to {local_dest}")
+
+        # --- 4b. Handle REMOTE clients via Ansible ---
+        if remote_clients:
+            print(f"\n  Distributing to remote clients via Ansible...")
+
+            # Command to DELETE the existing directory on remote clients
+            cmd_delete_dir = [
+                "ansible", "-i", inventory_path, "nvflare_clients",
+                "-m", "file",
+                "-a", f"path={remote_dest_path} state=absent"
+            ]
+
+            # Command to RE-CREATE the directory on remote clients
+            cmd_create_dir = [
+                "ansible", "-i", inventory_path, "nvflare_clients",
+                "-m", "file",
+                "-a", f"path={remote_dest_path} state=directory mode=0755"
             ]
 
             try:
-                # Run both copy commands for this client
-                subprocess.run(cmd_copy_train, check=True, text=True, capture_output=True, timeout=60)
-                subprocess.run(cmd_copy_test, check=True, text=True, capture_output=True, timeout=60)
-                
-            except subprocess.CalledProcessError as e:
-                print(f"\n❌ Error during Ansible copy to {client_name}:", file=sys.stderr)
-                print(e.stderr, file=sys.stderr)
-                # Continue to next client
-            
+                print(f"    Deleting remote directory '{remote_dest_path}' on remote clients...")
+                subprocess.run(cmd_delete_dir, check=True, text=True, capture_output=True, timeout=60)
+
+                print(f"    Re-creating remote directory '{remote_dest_path}'...")
+                subprocess.run(cmd_create_dir, check=True, text=True, capture_output=True, timeout=60)
+
+            except Exception as e:
+                print(f"\n❌ Error re-creating remote directories:", file=sys.stderr)
+                print(e.stderr if hasattr(e, 'stderr') else e, file=sys.stderr)
+                return
+
+            # Loop and send files one by one to remote clients
+            for client_name in remote_clients:
+                print(f"    Sending files to {client_name}...")
+
+                # --- Send client's train file ---
+                train_file_name = f"{client_name}_train.pt"
+                src_train_path = Path(temp_dir) / train_file_name
+                dest_train_path = Path(remote_dest_path) / train_file_name
+
+                cmd_copy_train = [
+                    "ansible", "-i", inventory_path, client_name,
+                    "-m", "copy",
+                    "-a", f"src={src_train_path} dest={dest_train_path} mode=0644"
+                ]
+
+                # --- Send shared test file ---
+                src_test_path = Path(temp_dir) / "test_data.pt"
+                dest_test_path = Path(remote_dest_path) / "test_data.pt"
+
+                cmd_copy_test = [
+                    "ansible", "-i", inventory_path, client_name,
+                    "-m", "copy",
+                    "-a", f"src={src_test_path} dest={dest_test_path} mode=0644"
+                ]
+
+                try:
+                    subprocess.run(cmd_copy_train, check=True, text=True, capture_output=True, timeout=60)
+                    subprocess.run(cmd_copy_test, check=True, text=True, capture_output=True, timeout=60)
+
+                except subprocess.CalledProcessError as e:
+                    print(f"\n❌ Error during Ansible copy to {client_name}:", file=sys.stderr)
+                    print(e.stderr, file=sys.stderr)
+
         print("\n✅ Successfully distributed all files.")
         
     print("--- Process Complete ---")

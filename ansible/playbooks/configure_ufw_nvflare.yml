@@ -1,0 +1,77 @@
+---
+# Configure UFW firewall rules for NVFlare communication
+# These rules persist across reboots (UFW stores rules in /etc/ufw/)
+# Run with: ansible-playbook -i ansible/inventory.ini ansible/playbooks/configure_ufw_nvflare.yml
+
+- name: Configure UFW Firewall for NVFlare
+  hosts: all
+  become: yes
+  vars:
+    nvflare_subnet: "172.19.1.0/24"
+    nvflare_ports:
+      - 8002  # Fed learn port
+      - 8003  # Admin port
+  tasks:
+    - name: Ensure UFW is installed
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: yes
+
+    - name: Ensure UFW is enabled and starts on boot
+      community.general.ufw:
+        state: enabled
+
+    - name: Allow SSH (prevent lockout) - CRITICAL
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+        comment: "SSH access"
+
+    - name: Allow NVFlare ports from internal subnet
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+        src: "{{ nvflare_subnet }}"
+        comment: "NVFlare port {{ item }} from internal subnet"
+      loop: "{{ nvflare_ports }}"
+
+    - name: Allow all traffic from NVFlare subnet (for Docker host networking)
+      community.general.ufw:
+        rule: allow
+        src: "{{ nvflare_subnet }}"
+        comment: "Allow all traffic from NVFlare subnet"
+
+    - name: Reload UFW to apply changes
+      community.general.ufw:
+        state: reloaded
+
+    - name: Display UFW status after configuration
+      ansible.builtin.command: ufw status numbered
+      register: ufw_final_status
+      changed_when: false
+
+    - name: Show final UFW rules
+      ansible.builtin.debug:
+        msg: "{{ ufw_final_status.stdout_lines }}"
+
+- name: Verify UFW persistence configuration
+  hosts: all
+  become: yes
+  tasks:
+    - name: Check UFW is enabled on boot (systemd)
+      ansible.builtin.systemd:
+        name: ufw
+        enabled: yes
+        state: started
+
+    - name: Verify UFW rules are saved to disk
+      ansible.builtin.stat:
+        path: /etc/ufw/user.rules
+      register: ufw_rules_file
+
+    - name: Confirm rules file exists
+      ansible.builtin.debug:
+        msg: "UFW rules file exists: {{ ufw_rules_file.stat.exists }} (rules persist across reboots)"

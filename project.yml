@@ -12,19 +12,26 @@ participants:
     fed_learn_port: 8002
     admin_port: 8003
     # docker_comm_port: 8005
-  - name: k3s-client-09
+  # Local client running on server node (k3s-server-07)
+  - name: k3s-server-07-client
     type: client
     org: nvidia
+  # Remote clients - currently active
   - name: k3s-client-08
     type: client
     org: nvidia
+  - name: k3s-client-09
+    type: client
+    org: nvidia
+  # Remote clients - deferred (unreachable as of 2026-01-29)
+  # To add: uncomment these and re-provision once connectivity is fixed
+  # - name: k3s-client-06
+  #   type: client
+  #   org: nvidia
   # - name: k3s-client-17
   #   type: client
   #   org: nvidia
   # - name: k3s-client-18
-  #   type: client
-  #   org: nvidia
-  # - name: k3s-client-06
   #   type: client
   #   org: nvidia
   - name: admin@nvidia.com

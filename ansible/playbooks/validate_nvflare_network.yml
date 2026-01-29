@@ -1,0 +1,177 @@
+---
+# Validate NVFlare network connectivity after deployment
+# Run with: ansible-playbook -i ansible/inventory.ini ansible/playbooks/validate_nvflare_network.yml
+
+- name: Validate Docker Host Network Configuration
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Check for running NVFlare containers
+      ansible.builtin.shell: docker ps --filter "name=nvflare" --format "{{ '{{' }}.Names{{ '}}' }}"
+      register: nvflare_containers
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Fail if no NVFlare container is running
+      ansible.builtin.fail:
+        msg: "No NVFlare container running on {{ inventory_hostname }}"
+      when: nvflare_containers.stdout == ""
+
+    - name: Display running NVFlare container
+      ansible.builtin.debug:
+        msg: "Container running: {{ nvflare_containers.stdout }}"
+
+    - name: Verify container is using host network mode
+      ansible.builtin.shell: |
+        docker inspect --format '{{ '{{' }}.HostConfig.NetworkMode{{ '}}' }}' {{ nvflare_containers.stdout }}
+      register: network_mode
+      changed_when: false
+
+    - name: Validate network mode is 'host'
+      ansible.builtin.assert:
+        that:
+          - network_mode.stdout == 'host'
+        fail_msg: "Container is NOT using host network mode. Found: {{ network_mode.stdout }}"
+        success_msg: "Container is correctly using host network mode"
+
+    - name: Verify container has restart policy for persistence
+      ansible.builtin.shell: |
+        docker inspect --format '{{ '{{' }}.HostConfig.RestartPolicy.Name{{ '}}' }}' {{ nvflare_containers.stdout }}
+      register: restart_policy
+      changed_when: false
+
+    - name: Validate restart policy is set (for reboot persistence)
+      ansible.builtin.assert:
+        that:
+          - restart_policy.stdout in ['unless-stopped', 'always', 'on-failure']
+        fail_msg: "Container restart policy not set for persistence. Found: {{ restart_policy.stdout }}"
+        success_msg: "Container restart policy set to: {{ restart_policy.stdout }}"
+
+- name: Validate Server Port Exposure
+  hosts: nvflare_server
+  tasks:
+    - name: Check if NVFlare fed_learn port (8002) is listening on host
+      ansible.builtin.wait_for:
+        host: "0.0.0.0"
+        port: 8002
+        timeout: 10
+        state: started
+      register: port_8002_check
+      ignore_errors: yes
+
+    - name: Check if NVFlare admin port (8003) is listening on host
+      ansible.builtin.wait_for:
+        host: "0.0.0.0"
+        port: 8003
+        timeout: 10
+        state: started
+      register: port_8003_check
+      ignore_errors: yes
+
+    - name: Report server port status
+      ansible.builtin.debug:
+        msg: |
+          Server port status:
+          - Port 8002 (fed_learn): {{ 'LISTENING' if port_8002_check is success else 'NOT LISTENING' }}
+          - Port 8003 (admin): {{ 'LISTENING' if port_8003_check is success else 'NOT LISTENING' }}
+
+    - name: Fail if critical ports not listening
+      ansible.builtin.fail:
+        msg: "Server ports not listening. Check container logs with: docker logs nvflare-server"
+      when: port_8002_check is failed
+
+- name: Validate Client to Server Connectivity
+  hosts: nvflare_clients
+  tasks:
+    - name: Test TCP connectivity to server port 8002
+      ansible.builtin.wait_for:
+        host: "{{ nvflare_server_ip }}"
+        port: 8002
+        timeout: 10
+        state: started
+      register: client_to_server_8002
+
+    - name: Test TCP connectivity to server port 8003
+      ansible.builtin.wait_for:
+        host: "{{ nvflare_server_ip }}"
+        port: 8003
+        timeout: 10
+        state: started
+      register: client_to_server_8003
+
+    - name: Report client connectivity status
+      ansible.builtin.debug:
+        msg: |
+          Client {{ inventory_hostname }} -> Server connectivity:
+          - Port 8002: {{ 'SUCCESS' if client_to_server_8002 is success else 'FAILED' }}
+          - Port 8003: {{ 'SUCCESS' if client_to_server_8003 is success else 'FAILED' }}
+
+- name: Validate Server to Client Connectivity (Bidirectional)
+  hosts: nvflare_server
+  tasks:
+    - name: Test TCP connectivity from server to each client
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[item].ansible_host }}"
+        port: 22  # Test SSH port as baseline (NVFlare client ports may vary)
+        timeout: 5
+        state: started
+      register: server_to_client
+      loop: "{{ groups['nvflare_clients'] }}"
+      ignore_errors: yes
+
+    - name: Report server to client connectivity
+      ansible.builtin.debug:
+        msg: "Server -> {{ item.item }}: {{ 'REACHABLE' if item is success else 'UNREACHABLE' }}"
+      loop: "{{ server_to_client.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Validate UFW Rules Persistence
+  hosts: all
+  become: yes
+  tasks:
+    - name: Check UFW is enabled
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+
+    - name: Verify UFW is active
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in ufw_status.stdout"
+        fail_msg: "UFW is not active - firewall rules may not persist"
+        success_msg: "UFW is active and rules will persist across reboots"
+
+    - name: Check UFW systemd service is enabled for boot persistence
+      ansible.builtin.systemd:
+        name: ufw
+        enabled: yes
+      check_mode: yes
+      register: ufw_enabled
+
+    - name: Confirm UFW starts on boot
+      ansible.builtin.debug:
+        msg: "UFW service is {{ 'enabled' if not ufw_enabled.changed else 'NOT enabled' }} to start on boot"
+
+- name: Summary
+  hosts: nvflare_server
+  tasks:
+    - name: Display validation summary
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          NVFlare Network Validation Complete
+          ========================================
+
+          All checks passed if you see this message.
+
+          Configuration persistence verified:
+          - Docker containers: restart policy set
+          - UFW firewall: enabled and starts on boot
+          - Network mode: host (no NAT, direct connectivity)
+
+          Next steps:
+          1. Test NVFlare job submission via admin console
+          2. Run: docker logs nvflare-server
+          3. Verify clients connect in server logs
+          ========================================

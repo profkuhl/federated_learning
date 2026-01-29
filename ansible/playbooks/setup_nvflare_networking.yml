@@ -1,0 +1,23 @@
+---
+# Master playbook: Complete NVFlare networking setup with persistence
+# This playbook orchestrates all networking configuration in the correct order
+#
+# Run with: ansible-playbook -i ansible/inventory.ini ansible/playbooks/setup_nvflare_networking.yml
+#
+# What this does:
+# 1. Configures UFW firewall rules (persistent across reboots)
+# 2. Configures /etc/hosts for hostname resolution (persistent)
+# 3. Deploys NVFlare containers with host networking (restart policy for persistence)
+# 4. Validates the entire setup
+
+- name: "Step 1: Configure UFW Firewall"
+  ansible.builtin.import_playbook: configure_ufw_nvflare.yml
+
+- name: "Step 2: Configure /etc/hosts"
+  ansible.builtin.import_playbook: configure_hosts_file.yml
+
+- name: "Step 3: Deploy NVFlare with Host Networking"
+  ansible.builtin.import_playbook: deploy_docker_nvflare.yml
+
+- name: "Step 4: Validate Network Configuration"
+  ansible.builtin.import_playbook: validate_nvflare_network.yml
