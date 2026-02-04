@@ -13,10 +13,11 @@ __pycache__/
 .__nvfl_sig.json
 .__nvfl_submitter.crt
 
-# NVFlare workspace (auto-generated certificates, keys, signatures)
-workspace/example_project/prod_00/*/startup/*.crt
-workspace/example_project/prod_00/*/startup/*.key
-workspace/example_project/prod_00/*/startup/*.pem
+# NVFlare workspace - certificates, keys, and signatures (security-sensitive)
+# These are auto-generated during provisioning and should not be in version control
+*.crt
+*.key
+*.pem
 workspace/example_project/prod_00/*/startup/signature.json
 workspace/example_project/prod_00/*/local/signature.json
 workspace/example_project/prod_00/*/.admin_cli_history
