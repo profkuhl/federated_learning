@@ -6,3 +6,9 @@ db.sqlite
 *.parquet
 *.csv
 .ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# NVFlare signature files (generated during job submission)
+.__nvfl_sig.json
+.__nvfl_submitter.crt
