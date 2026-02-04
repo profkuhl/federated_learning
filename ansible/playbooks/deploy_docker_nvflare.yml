@@ -15,13 +15,19 @@
         state: started
         enabled: yes
 
+    - name: Check if user's primary group exists
+      ansible.builtin.command: getent group {{ ansible_user }}
+      register: user_group_check
+      changed_when: false
+      failed_when: false
+
     - name: Create standard data directory for NVFlare datasets
       ansible.builtin.file:
         path: "{{ nvflare_data_dir }}"
         state: directory
         mode: '0755'
         owner: "{{ ansible_user }}"
-        group: "{{ ansible_user }}"
+        group: "{{ ansible_user if user_group_check.rc == 0 else 'root' }}"
 
 - name: 1. Provision Project and Deploy Server
   hosts: nvflare_server
@@ -184,6 +190,23 @@
         src: "{{ playbook_dir }}/../Dockerfile"
         dest: "{{ build_context_path }}/Dockerfile"
 
+    - name: Check if NVFlare Docker image already exists
+      community.docker.docker_image_info:
+        name: nvflare-pt-docker:latest
+      register: nvflare_image_info
+
+    - name: Check NVFlare version in existing image
+      ansible.builtin.shell: |
+        docker run --rm nvflare-pt-docker:latest pip show nvflare 2>/dev/null | grep "Version:" | awk '{print $2}'
+      register: existing_nvflare_version
+      when: nvflare_image_info.images | length > 0
+      changed_when: false
+      failed_when: false
+
+    - name: Determine if rebuild is needed (image missing or wrong version)
+      ansible.builtin.set_fact:
+        needs_rebuild: "{{ nvflare_image_info.images | length == 0 or (existing_nvflare_version.stdout | default('') != '2.7.1') }}"
+
     - name: Build the custom NVFlare Docker image locally on the client
       community.docker.docker_image:
         name: nvflare-pt-docker
@@ -192,6 +215,17 @@
           path: "{{ build_context_path }}"
         source: build
         force_source: yes
+      when: needs_rebuild | bool
+      register: image_build_result
+      ignore_errors: yes
+
+    - name: Fail if image needs rebuild and build failed
+      ansible.builtin.fail:
+        msg: "Docker image nvflare-pt-docker:latest needs rebuild (missing or wrong NVFlare version) but build failed. Check network connectivity to nvcr.io"
+      when:
+        - needs_rebuild | bool
+        - image_build_result is defined
+        - image_build_result is failed
 
     - name: Create client workspace directory
       ansible.builtin.file:
