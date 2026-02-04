@@ -23,17 +23,15 @@ participants:
   - name: k3s-client-09
     type: client
     org: nvidia
-  # Remote clients - deferred (unreachable as of 2026-01-29)
-  # To add: uncomment these and re-provision once connectivity is fixed
-  # - name: k3s-client-06
-  #   type: client
-  #   org: nvidia
-  # - name: k3s-client-17
-  #   type: client
-  #   org: nvidia
-  # - name: k3s-client-18
-  #   type: client
-  #   org: nvidia
+  - name: k3s-client-06
+    type: client
+    org: nvidia
+  - name: k3s-client-17
+    type: client
+    org: nvidia
+  - name: k3s-client-18
+    type: client
+    org: nvidia
   - name: admin@nvidia.com
     type: admin
     org: nvidia

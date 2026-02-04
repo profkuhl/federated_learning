@@ -12,3 +12,15 @@ __pycache__/
 # NVFlare signature files (generated during job submission)
 .__nvfl_sig.json
 .__nvfl_submitter.crt
+
+# NVFlare workspace (auto-generated certificates, keys, signatures)
+workspace/example_project/prod_00/*/startup/*.crt
+workspace/example_project/prod_00/*/startup/*.key
+workspace/example_project/prod_00/*/startup/*.pem
+workspace/example_project/prod_00/*/startup/signature.json
+workspace/example_project/prod_00/*/local/signature.json
+workspace/example_project/prod_00/*/.admin_cli_history
+workspace/example_project/state/cert.json
+
+# Ansible temporary files
+ansible/output.txt

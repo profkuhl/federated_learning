@@ -1,0 +1,151 @@
+---
+# Playbook to migrate from NetworkManager to systemd-networkd for netplan
+# Creates netplan config if missing, or adds 'renderer: networkd' line if exists
+# Run with --limit to test on specific hosts first
+# Example: ansible-playbook -i ansible/inventory.ini ansible/playbooks/migrate_to_networkd.yml --limit k3s-client-08
+
+- name: Migrate netplan to use systemd-networkd renderer
+  hosts: nvflare_server:nvflare_clients
+  become: yes
+  vars:
+    netplan_file: /etc/netplan/01-default-netcfg.yaml
+
+  tasks:
+    # Step 0: Check if netplan config exists
+    - name: Check if netplan config exists
+      stat:
+        path: "{{ netplan_file }}"
+      register: netplan_exists
+
+    # Step 0a: Backup existing netplan config if it exists
+    - name: Backup existing netplan config
+      copy:
+        src: "{{ netplan_file }}"
+        dest: "{{ netplan_file }}.pre-networkd-migration"
+        remote_src: yes
+        force: no
+      when: netplan_exists.stat.exists
+
+    # Step 0b: Create netplan config if it doesn't exist (for server)
+    - name: Create netplan config with networkd renderer
+      copy:
+        dest: "{{ netplan_file }}"
+        content: |
+          network:
+            version: 2
+            renderer: networkd
+            ethernets:
+              eno1:
+                dhcp4: no
+                addresses:
+                  - {{ ansible_host }}/24
+                routes:
+                  - to: default
+                    via: 172.19.0.1
+                nameservers:
+                  addresses: [1.1.1.1, 8.8.8.8]
+        mode: '0600'
+        owner: root
+        group: root
+      when: not netplan_exists.stat.exists
+
+    # Step 1: Add renderer line (if config exists but no renderer)
+    - name: Check if renderer line already exists
+      command: grep -q "renderer:" "{{ netplan_file }}"
+      register: renderer_exists
+      failed_when: false
+      changed_when: false
+      when: netplan_exists.stat.exists
+
+    - name: Add renderer networkd line after version line
+      lineinfile:
+        path: "{{ netplan_file }}"
+        insertafter: "^  version: 2"
+        line: "  renderer: networkd"
+        state: present
+      when: netplan_exists.stat.exists and renderer_exists.rc != 0
+      register: renderer_added
+
+    # Step 2: Enable systemd-networkd to start on boot
+    - name: Enable systemd-networkd to start on boot
+      systemd:
+        name: systemd-networkd
+        enabled: yes
+
+    # Step 3: Generate networkd configuration files
+    - name: Generate networkd configuration from netplan
+      command: netplan generate
+
+    # Step 4: Apply netplan configuration (starts networkd)
+    - name: Apply netplan configuration
+      command: netplan apply
+
+    - name: Wait for network and DNS to stabilize
+      pause:
+        seconds: 15
+
+    # Verification before disabling NetworkManager
+    - name: Verify connectivity - ping gateway
+      command: ping -c 2 -W 5 172.19.0.1
+      register: ping_gateway
+      changed_when: false
+      failed_when: ping_gateway.rc != 0
+
+    - name: Verify connectivity - ping google.com
+      command: ping -c 2 -W 10 google.com
+      register: ping_google
+      changed_when: false
+      failed_when: ping_google.rc != 0
+
+    - name: Verify networkd is managing eno1
+      command: networkctl status eno1
+      register: networkctl_status
+      changed_when: false
+
+    - name: Display networkctl status
+      debug:
+        msg: "{{ networkctl_status.stdout_lines[:8] }}"
+
+    - name: Assert networkd is managing the interface
+      assert:
+        that:
+          - "'unmanaged' not in networkctl_status.stdout"
+        fail_msg: "STOPPING - systemd-networkd is not managing eno1"
+        success_msg: "systemd-networkd is managing eno1 - safe to disable NetworkManager"
+
+    # Step 5 & 6: Stop NetworkManager and disable from boot
+    - name: Stop NetworkManager and disable from boot
+      systemd:
+        name: NetworkManager
+        enabled: no
+        state: stopped
+
+    # Final verification
+    - name: Final connectivity check - ping gateway
+      command: ping -c 2 -W 5 172.19.0.1
+      register: final_ping_gateway
+      changed_when: false
+      failed_when: final_ping_gateway.rc != 0
+
+    - name: Final connectivity check - ping google.com
+      command: ping -c 2 -W 10 google.com
+      register: final_ping_google
+      changed_when: false
+      failed_when: final_ping_google.rc != 0
+
+    - name: Show final service status
+      shell: |
+        echo "systemd-networkd enabled: $(systemctl is-enabled systemd-networkd)"
+        echo "systemd-networkd active: $(systemctl is-active systemd-networkd)"
+        echo "NetworkManager enabled: $(systemctl is-enabled NetworkManager)"
+        echo "NetworkManager active: $(systemctl is-active NetworkManager)"
+      register: service_status
+      changed_when: false
+
+    - name: Migration summary
+      debug:
+        msg: |
+          === Migration complete for {{ inventory_hostname }} ===
+          {{ service_status.stdout }}
+          Gateway ping: SUCCESS
+          Google ping: SUCCESS

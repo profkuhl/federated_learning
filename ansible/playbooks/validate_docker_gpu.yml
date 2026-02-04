@@ -1,0 +1,73 @@
+---
+# Validate Docker and GPU prerequisites on all nodes
+# Run with: ansible-playbook -i ansible/inventory.ini ansible/playbooks/validate_docker_gpu.yml
+
+- name: Validate Docker and GPU Prerequisites
+  hosts: all
+  tasks:
+    - name: Check Docker is installed
+      ansible.builtin.command: docker --version
+      register: docker_version
+      changed_when: false
+
+    - name: Display Docker version
+      ansible.builtin.debug:
+        msg: "{{ docker_version.stdout }}"
+
+    - name: Check Docker service is running
+      ansible.builtin.service_facts:
+
+    - name: Verify Docker service status
+      ansible.builtin.assert:
+        that:
+          - "'docker' in ansible_facts.services or 'docker.service' in ansible_facts.services"
+        fail_msg: "Docker service not found"
+        success_msg: "Docker service is available"
+
+    - name: Check nvidia-smi is available
+      ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+      register: nvidia_smi
+      changed_when: false
+
+    - name: Display GPU information
+      ansible.builtin.debug:
+        msg: "GPU: {{ nvidia_smi.stdout }}"
+
+    - name: Check NVIDIA Container Toolkit is installed
+      ansible.builtin.command: nvidia-container-cli --version
+      register: nvidia_container_cli
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display NVIDIA Container Toolkit version
+      ansible.builtin.debug:
+        msg: "{{ nvidia_container_cli.stdout | default('Not installed - may need nvidia-container-toolkit') }}"
+
+    - name: Test Docker can access GPU
+      ansible.builtin.command: docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi --query-gpu=name --format=csv,noheader
+      register: docker_gpu_test
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display Docker GPU access result
+      ansible.builtin.debug:
+        msg: "Docker GPU access: {{ docker_gpu_test.stdout | default('FAILED - ' + docker_gpu_test.stderr | default('unknown error')) }}"
+
+    - name: Verify Docker can access GPU
+      ansible.builtin.assert:
+        that:
+          - docker_gpu_test.rc == 0
+        fail_msg: "Docker cannot access GPU. Ensure nvidia-container-toolkit is installed and configured."
+        success_msg: "Docker GPU access verified successfully"
+
+- name: Summary
+  hosts: all
+  tasks:
+    - name: Print node readiness summary
+      ansible.builtin.debug:
+        msg: |
+          Node: {{ inventory_hostname }}
+          Status: READY for NVFlare deployment
+          - Docker: Available
+          - GPU: Available
+          - Docker GPU Access: Verified
