@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Federated learning project built on NVIDIA FLARE (NVFlare) for distributed machine learning across GPU-equipped client nodes. Uses Ansible for infrastructure management and Docker containers with host networking. Supports PyTorch models (MNIST, CIFAR-10, ResNet) with configurable non-IID data distribution.
+Federated learning project built on NVIDIA FLARE (NVFlare) 2.7.1 for distributed machine learning across GPU-equipped client nodes. Uses Ansible for infrastructure management and Docker containers with host networking. Supports PyTorch models (MNIST, CIFAR-10, ResNet) with configurable non-IID data distribution.
 
 **Detailed deployment guide**: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
@@ -28,100 +28,170 @@ Federated learning project built on NVIDIA FLARE (NVFlare) for distributed machi
 ansible-playbook -i ansible/inventory.ini ansible/playbooks/setup_nvflare_networking.yml
 ```
 
-### Individual Playbooks
+### Validation Playbooks
 ```bash
-# Test connectivity
+# Test SSH connectivity
 ansible-playbook -i ansible/inventory.ini ansible/playbooks/ping_all_nodes.yml
 
-# Deploy containers only
-ansible-playbook -i ansible/inventory.ini ansible/playbooks/deploy_docker_nvflare.yml
+# Validate Docker and GPU prerequisites
+ansible-playbook -i ansible/inventory.ini ansible/playbooks/validate_docker_gpu.yml
 
-# Network diagnostics
+# Validate NVFlare network configuration
+ansible-playbook -i ansible/inventory.ini ansible/playbooks/validate_nvflare_network.yml
+
+# Full network diagnostics
 ansible-playbook -i ansible/inventory.ini ansible/playbooks/diagnose_network.yml
+```
+
+### Individual Deployment Playbooks
+```bash
+# Deploy containers only (after manual provisioning)
+ansible-playbook -i ansible/inventory.ini ansible/playbooks/deploy_docker_nvflare.yml
 
 # Configure firewall (ports 8002/8003)
 ansible-playbook -i ansible/inventory.ini ansible/playbooks/configure_ufw_nvflare.yml
+
+# Configure /etc/hosts for hostname resolution
+ansible-playbook -i ansible/inventory.ini ansible/playbooks/configure_hosts_file.yml
 ```
 
-### NVFlare Operations
+### Data Distribution
 ```bash
-# Provision workspace (generates certs and startup kits)
-nvflare provision -p project.yml -w workspace/example_project
+# MNIST with uniform (IID) split
+python scripts/distribute_splits.py --dataset mnist --split_method uniform
 
-# Generate job configuration from project.yml
-cd jobs/pt_resnet && python fedavg_script_runner_pt.py -p ../../project.yml
+# CIFAR-10 with non-IID (square) split
+python scripts/distribute_splits.py --dataset cifar10 --split_method square
+
+# Custom dataset
+python scripts/distribute_splits.py --dataset custom --data_path /path/to/data.pt --split_method linear
+```
+
+Split methods: `uniform` (IID), `linear`, `square`, `exponential` (increasingly non-IID)
+
+### Job Submission
+```bash
+# Submit pre-configured jobs
+nvflare job submit -j jobs/configs/pt_mnist_fedavg
+nvflare job submit -j jobs/configs/pt_cifar10_resnet18
+
+# Generate custom job config
+cd jobs/generators && python fedavg_mnist.py -p ../../project.yml
+```
+
+### Job Monitoring
+```bash
+# One-time status check
+python scripts/job_status.py <job_id>
+
+# Continuous monitoring with progress bars
+python scripts/job_status.py <job_id> --watch
+
+# Custom rounds/clients
+python scripts/job_status.py <job_id> --watch --rounds 10 --clients 6
 ```
 
 ### Container Management
 ```bash
 # View logs
 docker logs nvflare-server
-docker logs nvflare-client-08  # Pattern: nvflare-client-{node_number}
+docker logs nvflare-client-09  # Pattern: nvflare-client-{node_number}
 
-# Stop/restart via Ansible
-ansible -i ansible/inventory.ini all -a "docker stop \$(docker ps -q)"
+# View all container status
+ansible -i ansible/inventory.ini all -a "docker ps"
+
+# Restart all containers
 ansible -i ansible/inventory.ini all -a "docker restart \$(docker ps -q)"
 ```
-
-### Data Distribution
-```bash
-# Split and distribute dataset to clients
-python scripts/distribute_splits.py \
-  --data_path /path/to/dataset.csv \
-  --split_method square \
-  --inventory ansible/inventory.ini \
-  --remote_dest /tmp/nvflare/data_splits
-```
-
-Split methods: `uniform` (IID), `linear`, `square`, `exponential` (increasingly heterogeneous)
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `project.yml` | Defines participants (server, clients, admin) and Docker image name |
-| `ansible/inventory.ini` | Node IPs, SSH users, NVFlare ports |
-| `ansible/Dockerfile` | NVFlare container image (NVIDIA PyTorch base + NVFlare 2.7.0) |
-| `notebooks/utils/data_utils.py` | `split_and_distribute()` for tensor datasets |
-| `scripts/distribute_splits.py` | CLI for file-based dataset splitting |
+| `ansible/inventory.ini` | Node IPs, SSH users, NVFlare ports, data directories |
+| `ansible/Dockerfile` | NVFlare container image (nvidia/pytorch:24.12-py3 + NVFlare 2.7.1) |
+| `scripts/distribute_splits.py` | Dataset distribution with IID/non-IID splits |
+| `scripts/job_status.py` | Real-time job monitoring with progress bars |
+
+## Project Structure
+
+```
+federated_learning/
+├── project.yml                 # NVFlare participant definitions
+├── ansible/
+│   ├── inventory.ini           # Node IPs and SSH configuration
+│   ├── Dockerfile              # Container image definition
+│   └── playbooks/              # Ansible automation
+│       ├── setup_nvflare_networking.yml   # Master orchestration
+│       ├── deploy_docker_nvflare.yml      # Container deployment
+│       ├── validate_docker_gpu.yml        # GPU validation
+│       └── ...
+├── jobs/
+│   ├── configs/                # Ready-to-submit job configurations
+│   │   ├── pt_mnist_fedavg/    # MNIST + CNN example
+│   │   └── pt_cifar10_resnet18/# CIFAR-10 + ResNet-18
+│   ├── generators/             # Scripts to generate job configs
+│   │   ├── fedavg_mnist.py
+│   │   └── fedavg_cifar10.py
+│   └── src/                    # Training scripts and models
+│       ├── pt_mnist_fl.py      # MNIST training script
+│       ├── pt_cifar10_fl.py    # CIFAR-10 training script
+│       ├── mnist_cnn.py        # CNN model definition
+│       └── resnet18_cifar10.py # ResNet-18 model definition
+├── scripts/
+│   ├── distribute_splits.py    # Dataset distribution
+│   └── job_status.py           # Job monitoring
+├── workspace/                  # Generated NVFlare workspace
+│   └── example_project/prod_00/# Certificates and startup kits
+└── docs/
+    └── DEPLOYMENT.md           # Detailed deployment guide
+```
 
 ## Job Structure
 
-Jobs under `jobs/pt_resnet/`:
-- `fedavg_script_runner_pt.py` - Reads `project.yml`, generates per-client configs
-- `src/pt_mnist_fl.py` - Training script using NVFlare Client API
-- `src/mnist_cnn.py`, `src/resnet_18.py` - Model definitions
-- `job_config/` - Generated output with `app_server/` and `app_<client>/` directories
+Jobs are stored in `jobs/configs/`. Each job has:
+- `meta.json` - Job metadata and deployment map
+- `app/config/` - Server and client configuration
+- `app/custom/src/` - Training scripts and models
 
-Training scripts must use NVFlare Client API pattern:
+Training scripts use NVFlare Client API pattern:
 ```python
+import nvflare.client as flare
+from nvflare.app_common.abstract.fl_model import ParamsType
+
 flare.init()
 while flare.is_running():
-    model = flare.receive()
+    input_model = flare.receive()
     # ... train ...
-    flare.send(FLModel(params=model.state_dict()))
+    output_model = flare.FLModel(
+        params=model.state_dict(),
+        params_type=ParamsType.FULL,
+        metrics={"accuracy": accuracy}
+    )
+    flare.send(output_model)
 ```
 
 ## Development Workflow
 
-1. Update `project.yml` with participants and `ansible/inventory.ini` with IPs
-2. Provision: `nvflare provision -p project.yml -w workspace/example_project`
-3. Deploy: `ansible-playbook -i ansible/inventory.ini ansible/playbooks/setup_nvflare_networking.yml`
-4. Distribute data using `data_utils.py` or `distribute_splits.py`
-5. Generate job: `cd jobs/pt_resnet && python fedavg_script_runner_pt.py -p ../../project.yml`
-6. Submit job via NVFlare admin console
+1. **Configure participants** - Edit `project.yml` and `ansible/inventory.ini`
+2. **Deploy cluster** - `ansible-playbook -i ansible/inventory.ini ansible/playbooks/setup_nvflare_networking.yml`
+3. **Distribute data** - `python scripts/distribute_splits.py --dataset mnist --split_method uniform`
+4. **Submit job** - `nvflare job submit -j jobs/configs/pt_mnist_fedavg`
+5. **Monitor progress** - `python scripts/job_status.py <job_id> --watch`
 
 ## Adding/Removing Clients
 
-1. Edit `ansible/inventory.ini` (uncomment/add client lines)
-2. Edit `project.yml` (add/remove participant entries)
-3. Re-provision: `nvflare provision -p project.yml -w workspace/example_project`
-4. Re-deploy: `ansible-playbook -i ansible/inventory.ini ansible/playbooks/setup_nvflare_networking.yml`
+1. Edit `ansible/inventory.ini` - add/remove client lines
+2. Edit `project.yml` - add/remove participant entries
+3. Re-deploy: `ansible-playbook -i ansible/inventory.ini ansible/playbooks/setup_nvflare_networking.yml`
 
 ## Important Notes
 
 - **Never edit** auto-generated NVFlare files in `workspace/` - use Ansible playbooks instead
-- **Data is not auto-distributed** - must manually split and copy before running jobs
+- **Data must be distributed** before running jobs - use `scripts/distribute_splits.py`
 - Containers use `restart_policy: unless-stopped` (persist through reboots)
-- Docker image: `nvflare-pt-docker` built from `nvcr.io/nvidia/pytorch:25.10-py3`
+- Docker image: `nvflare-pt-docker` built from `nvcr.io/nvidia/pytorch:24.12-py3`
+- NVFlare version: 2.7.1
 - All playbooks use `community.docker.docker_container` module, not the generated `docker.sh` scripts
+- Data directory: `~/nvflare_data/{dataset}/` mounted as `/data/` in containers
