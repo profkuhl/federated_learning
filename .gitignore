@@ -24,3 +24,8 @@ workspace/example_project/state/cert.json
 
 # Ansible temporary files
 ansible/output.txt
+
+# New client workspace directories (auto-generated)
+workspace/example_project/prod_00/k3s-client-06/
+workspace/example_project/prod_00/k3s-client-17/
+workspace/example_project/prod_00/k3s-client-18/
