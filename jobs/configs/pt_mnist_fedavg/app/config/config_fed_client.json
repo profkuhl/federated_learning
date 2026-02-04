@@ -2,9 +2,7 @@
     "format_version": 2,
     "executors": [
         {
-            "tasks": [
-                "*"
-            ],
+            "tasks": ["*"],
             "executor": {
                 "path": "nvflare.app_opt.pt.in_process_client_api_executor.PTInProcessClientAPIExecutor",
                 "args": {
@@ -18,9 +16,7 @@
             "id": "event_to_fed",
             "path": "nvflare.app_common.widgets.convert_to_fed_event.ConvertToFedEvent",
             "args": {
-                "events_to_convert": [
-                    "analytix_log_stats"
-                ]
+                "events_to_convert": ["analytix_log_stats"]
             }
         }
     ],

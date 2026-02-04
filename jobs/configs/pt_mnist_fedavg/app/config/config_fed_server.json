@@ -4,7 +4,9 @@
         {
             "id": "controller",
             "path": "nvflare.app_common.workflows.fedavg.FedAvg",
-            "args": {}
+            "args": {
+                "num_clients": 6
+            }
         }
     ],
     "components": [

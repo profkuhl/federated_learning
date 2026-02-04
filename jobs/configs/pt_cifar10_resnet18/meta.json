@@ -1,0 +1,8 @@
+{
+    "name": "pt_cifar10_resnet18",
+    "resource_spec": {},
+    "min_clients": 1,
+    "deploy_map": {
+        "app": ["@ALL"]
+    }
+}
